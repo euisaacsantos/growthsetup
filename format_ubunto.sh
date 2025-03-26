@@ -4,11 +4,19 @@
 # Execute como root (sudo)
 
 # Configurações - ALTERE ESTAS VARIÁVEIS CONFORME NECESSÁRIO
-TARGET_DISK="sda"  # Disco a ser formatado (ex: sda, vda, nvme0n1)
+# O disco alvo será detectado automaticamente
 HOSTNAME="ubuntu-server"  # Nome do servidor
 USERNAME="ubuntu"  # Nome do usuário a ser criado
 PASSWORD="ubuntu"  # Senha do usuário
 TIMEZONE="America/Sao_Paulo"  # Fuso horário
+
+# Detectar o disco principal automaticamente
+ROOT_DISK=$(lsblk -d -o NAME,SIZE,TYPE | grep -v loop | grep disk | head -n1 | awk '{print $1}')
+if [ -z "$ROOT_DISK" ]; then
+  echo "Erro: Não foi possível detectar um disco válido no sistema!"
+  exit 1
+fi
+TARGET_DISK=$ROOT_DISK
 
 # Verificar se está executando como root
 if [ "$EUID" -ne 0 ]; then
@@ -31,11 +39,9 @@ echo "Hostname: $HOSTNAME"
 echo "Usuário: $USERNAME"
 echo ""
 
-# Verificar se o disco existe
-if ! lsblk | grep -q "^$TARGET_DISK"; then
-  echo "Erro: O disco $TARGET_DISK não foi encontrado!"
-  exit 1
-fi
+# Mostrar informações sobre o disco detectado
+print_msg "Disco detectado:"
+lsblk -o NAME,SIZE,TYPE,MODEL,MOUNTPOINT /dev/$TARGET_DISK
 
 # Verificar conexão com a internet
 print_msg "Verificando conexão com a internet..."
