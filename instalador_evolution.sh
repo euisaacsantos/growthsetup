@@ -5,7 +5,7 @@
 PORTAINER_URL="https://painel.trafegocomia.com"  # URL do seu Portainer
 PORTAINER_USER="admin"                  # Seu usuário do Portainer
 PORTAINER_PASSWORD="fpU6TW3Dg7ulCL+k"           # Sua senha do Portainer (altere aqui)
-STACK_NAME="evolution-stack"            # Nome da stack
+STACK_NAME="evolution-stack2"            # Nome da stack
 
 # Gerar uma chave API aleatória para a Evolution
 API_KEY=$(openssl rand -hex 16)
