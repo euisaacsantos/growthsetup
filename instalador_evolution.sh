@@ -1,17 +1,77 @@
-#!/bin/bash
+# Função principal
+main() {
+  # Inicializar variáveis
+  local portainer_url=""
+  local portainer_user=""
+  local portainer_password=""
+  local domain=""
+  local systems=""
+  local force_install=false
+  
+  # Processar argumentos
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p|--portainer-url)
+        portainer_url="$2"
+        shift 2
+        ;;
+      -u|--portainer-user)
+        portainer_user="$2"
+        shift 2
+        ;;
+      -w|--portainer-password)
+        portainer_password="$2"
+        shift 2
+        ;;
+      -d|--domain)
+        domain="$2"
+        shift 2
+        ;;
+      -s|--systems)
+        systems="$2"
+        shift 2
+        ;;
+      -f|--force)
+        force_install=true
+        shift
+        ;;
+      -h|--help)
+        usage
+        ;;
+      *)
+        log "Opção desconhecida: $1" "$RED"
+        usage
+        ;;
+    esac
+  done
+  
+  # Validar argumentos obrigatórios
+  if [ -z "$portainer_url" ] || [ -z "$portainer_user" ] || [ -z "$portainer_password" ] || [ -z "$domain" ] || [ -z "$systems" ]; then
+    log "Argumentos obrigatórios faltando!" "$RED"
+    usage
+  fi
+  
+  # Validar URL do Portainer
+  validate_url "$portainer_url"
+  
+  # Verificar dependências
+  check_dependencies
+  
+  # Iniciar instalação
+  install_systems "$systems" "$domain" "$portainer_url" "$portainer_user" "$portainer_password" "$force_install"
+}
+
+# Iniciar o script
+main "$@"#!/bin/bash
 #
 # Growth Installer - Script para instalação automatizada de sistemas
-# Versão: 1.0
+# Versão: 1.1 (Corrigida)
 # Data: 26/03/2025
 #
 # Este script permite a instalação automatizada de sistemas como:
 # - Redis
 # - PostgreSQL
 # - Evolution API
-# - Outros sistemas (conforme configurado)
-#
-# O script verifica dependências, cria recursos necessários
-# e instala os sistemas na ordem correta.
 
 # Cores para exibição
 GREEN='\033[0;32m'
@@ -45,6 +105,7 @@ usage() {
   echo "  -d, --domain DOMAIN          Domínio principal (ex: example.com)"
   echo "  -s, --systems SYS1,SYS2,...  Sistemas a instalar (separados por vírgula)"
   echo "                               Sistemas disponíveis: redis,postgres,evolution"
+  echo "  -f, --force                  Força reinstalação mesmo se o sistema já existir"
   echo "  -h, --help                   Mostra esta ajuda"
   echo ""
   echo "Exemplo:"
@@ -56,7 +117,7 @@ usage() {
 validate_url() {
   local url=$1
   if [[ ! $url =~ ^https?:// ]]; then
-    log "URL invalida: $url. Deve começar com http:// ou https://" "$RED"
+    log "URL inválida: $url. Deve começar com http:// ou https://" "$RED"
     exit 1
   fi
 }
@@ -78,7 +139,7 @@ check_dependencies() {
   # Se houver dependências faltando, instale-as
   if [ ${#missing_deps[@]} -gt 0 ]; then
     log "Instalando dependências: ${missing_deps[*]}" "$YELLOW"
-    apt update
+    apt update -qq
     apt install -y "${missing_deps[@]}"
   fi
 }
@@ -105,7 +166,7 @@ EOF
     -d "$auth_data")
   
   # Verificar se houve erro
-  if echo "$response" | grep -q "error"; then
+  if [[ "$response" == *"error"* || "$response" == *"message"* && "$response" != *"jwt"* ]]; then
     local error_msg=$(echo "$response" | jq -r '.message // "Erro desconhecido"')
     log "Falha na autenticação: $error_msg" "$RED"
     exit 1
@@ -134,8 +195,17 @@ check_stack_exists() {
     "${portainer_url}/api/stacks" \
     -H "Authorization: Bearer ${auth_token}")
   
-  echo "$response" | jq -e '.[] | select(.Name == "'"$stack_name"'")' &>/dev/null
-  return $?
+  # Verificar resposta para debugging
+  echo "$response" > "${TEMP_DIR}/stacks_response.json"
+  
+  # Contar quantos stacks têm esse nome exato
+  local count=$(echo "$response" | jq -r '.[] | select(.Name == "'"$stack_name"'") | .Name' | wc -l)
+  
+  if [ "$count" -gt 0 ]; then
+    return 0 # Existe
+  else
+    return 1 # Não existe
+  fi
 }
 
 # Função para verificar se uma rede existe
@@ -150,8 +220,13 @@ check_network_exists() {
     "${portainer_url}/api/endpoints/1/docker/networks" \
     -H "Authorization: Bearer ${auth_token}")
   
-  echo "$response" | jq -e '.[] | select(.Name == "'"$network_name"'")' &>/dev/null
-  return $?
+  local count=$(echo "$response" | jq -r '.[] | select(.Name == "'"$network_name"'") | .Name' | wc -l)
+  
+  if [ "$count" -gt 0 ]; then
+    return 0 # Existe
+  else
+    return 1 # Não existe
+  fi
 }
 
 # Função para verificar se um volume existe
@@ -166,8 +241,13 @@ check_volume_exists() {
     "${portainer_url}/api/endpoints/1/docker/volumes" \
     -H "Authorization: Bearer ${auth_token}")
   
-  echo "$response" | jq -e '.Volumes[] | select(.Name == "'"$volume_name"'")' &>/dev/null
-  return $?
+  local count=$(echo "$response" | jq -r '.Volumes[] | select(.Name == "'"$volume_name"'") | .Name' | wc -l)
+  
+  if [ "$count" -gt 0 ]; then
+    return 0 # Existe
+  else
+    return 1 # Não existe
+  fi
 }
 
 # Função para criar uma rede
@@ -236,6 +316,39 @@ EOF
   return 0
 }
 
+# Função para remover um stack existente
+remove_stack() {
+  local stack_name="$1"
+  local portainer_url="$2"
+  local auth_token="$3"
+  
+  log "Removendo stack '$stack_name' existente..." "$YELLOW"
+  
+  # Primeiro, obter o ID do stack
+  local response=$(curl -s -X GET \
+    "${portainer_url}/api/stacks" \
+    -H "Authorization: Bearer ${auth_token}")
+  
+  local stack_id=$(echo "$response" | jq -r '.[] | select(.Name == "'"$stack_name"'") | .Id')
+  
+  if [ -z "$stack_id" ] || [ "$stack_id" == "null" ]; then
+    log "Stack '$stack_name' não encontrado para remoção." "$YELLOW"
+    return 0
+  fi
+  
+  # Remover o stack
+  local remove_response=$(curl -s -X DELETE \
+    "${portainer_url}/api/stacks/${stack_id}" \
+    -H "Authorization: Bearer ${auth_token}")
+  
+  log "Stack '$stack_name' removido com sucesso!" "$GREEN"
+  
+  # Aguardar um pouco para o stack ser completamente removido
+  sleep 5
+  
+  return 0
+}
+
 # Função para criar um stack
 create_stack() {
   local stack_name="$1"
@@ -259,11 +372,17 @@ create_stack() {
 EOF
 )
   
+  # Salvar os dados para debug
+  echo "$stack_data" > "${TEMP_DIR}/${stack_name}_request.json"
+  
   local response=$(curl -s -X POST \
     "${portainer_url}/api/stacks" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${auth_token}" \
     -d "$stack_data")
+  
+  # Salvar resposta para debug
+  echo "$response" > "${TEMP_DIR}/${stack_name}_response.json"
   
   # Verificar se houve erro
   if echo "$response" | grep -q "error" || echo "$response" | grep -q "message"; then
@@ -343,66 +462,6 @@ networks:
   GrowthNet:
     external: true
     name: GrowthNet
-# Função para salvar credenciais
-save_credentials() {
-  local systems="$1"
-  local domain="$2"
-  local portainer_url="$3"
-  local portainer_user="$4"
-  local portainer_password="$5"
-  
-  # Criar diretório para credenciais
-  mkdir -p /root/.credentials
-  chmod 700 /root/.credentials
-  
-  # Arquivo para credenciais do Portainer
-  cat > /root/.credentials/portainer.txt << EOF
-Portainer Admin Credentials
-URL: ${portainer_url}
-Username: ${portainer_user}
-Password: ${portainer_password}
-EOF
-  chmod 600 /root/.credentials/portainer.txt
-  
-  # Arquivo para cada sistema instalado
-  for system in ${systems//,/ }; do
-    case "$system" in
-      "redis")
-        cat > /root/.credentials/redis.txt << EOF
-Redis Information
-URL: redis://redis:6379
-Network: GrowthNet
-Volume: redis_data
-EOF
-        ;;
-      "postgres")
-        cat > /root/.credentials/postgres.txt << EOF
-PostgreSQL Information
-Host: postgres
-Port: 5432
-User: postgres
-Password: b2ecbaa44551df03fa3793b38091cff7
-Network: GrowthNet
-Volume: postgres_data
-EOF
-        ;;
-      "evolution")
-        cat > /root/.credentials/evolution.txt << EOF
-Evolution API Information
-URL: https://api.${domain}
-API Key: 2dc7b3194ce0704b12f68305f1904ca4
-Network: GrowthNet
-Volume: evolution_instances
-Database: postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/evolution
-EOF
-        ;;
-    esac
-    chmod 600 /root/.credentials/${system}.txt
-  done
-  
-  log "Credenciais salvas em /root/.credentials/" "$GREEN"
-}
-
 # Função para instalar sistemas
 install_systems() {
   local systems="$1"
@@ -410,6 +469,7 @@ install_systems() {
   local portainer_url="$3"
   local portainer_user="$4"
   local portainer_password="$5"
+  local force_install="$6"
   
   # Criar diretório temporário
   mkdir -p "$TEMP_DIR"
@@ -462,9 +522,16 @@ install_systems() {
   # Instalar cada sistema na ordem determinada
   for system in $install_order; do
     # Verificar se o sistema já está instalado
+    local system_exists=false
     if check_stack_exists "$system" "$portainer_url" "$auth_token"; then
-      log "Sistema '$system' já está instalado. Pulando." "$YELLOW"
-      continue
+      system_exists=true
+      if [ "$force_install" = true ]; then
+        log "Sistema '$system' já existe, mas será reinstalado conforme solicitado." "$YELLOW"
+        remove_stack "$system" "$portainer_url" "$auth_token"
+      else
+        log "Sistema '$system' já está instalado. Pulando." "$YELLOW"
+        continue
+      fi
     fi
     
     # Verificar e criar volumes necessários
@@ -472,16 +539,22 @@ install_systems() {
       "redis")
         if ! check_volume_exists "redis_data" "$portainer_url" "$auth_token"; then
           create_volume "redis_data" "$portainer_url" "$auth_token"
+        else
+          log "Volume 'redis_data' já existe." "$GREEN"
         fi
         ;;
       "postgres")
         if ! check_volume_exists "postgres_data" "$portainer_url" "$auth_token"; then
           create_volume "postgres_data" "$portainer_url" "$auth_token"
+        else
+          log "Volume 'postgres_data' já existe." "$GREEN"
         fi
         ;;
       "evolution")
         if ! check_volume_exists "evolution_instances" "$portainer_url" "$auth_token"; then
           create_volume "evolution_instances" "$portainer_url" "$auth_token"
+        else
+          log "Volume 'evolution_instances' já existe." "$GREEN"
         fi
         ;;
     esac
@@ -521,63 +594,34 @@ install_systems() {
   log "Instalação concluída!" "$GREEN"
 }
 
-# Função principal
-main() {
-  # Inicializar variáveis
-  local portainer_url=""
-  local portainer_user=""
-  local portainer_password=""
-  local domain=""
-  local systems=""
+# Função para gerar arquivo de configuração do PostgreSQL
+generate_postgres_config() {
+  local domain="$1"
   
-  # Processar argumentos
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -p|--portainer-url)
-        portainer_url="$2"
-        shift 2
-        ;;
-      -u|--portainer-user)
-        portainer_user="$2"
-        shift 2
-        ;;
-      -w|--portainer-password)
-        portainer_password="$2"
-        shift 2
-        ;;
-      -d|--domain)
-        domain="$2"
-        shift 2
-        ;;
-      -s|--systems)
-        systems="$2"
-        shift 2
-        ;;
-      -h|--help)
-        usage
-        ;;
-      *)
-        log "Opção desconhecida: $1" "$RED"
-        usage
-        ;;
-    esac
-  done
-  
-  # Validar argumentos obrigatórios
-  if [ -z "$portainer_url" ] || [ -z "$portainer_user" ] || [ -z "$portainer_password" ] || [ -z "$domain" ] || [ -z "$systems" ]; then
-    log "Argumentos obrigatórios faltando!" "$RED"
-    usage
-  fi
-  
-  # Validar URL do Portainer
-  validate_url "$portainer_url"
-  
-  # Verificar dependências
-  check_dependencies
-  
-  # Iniciar instalação
-  install_systems "$systems" "$domain" "$portainer_url" "$portainer_user" "$portainer_password"
-}
+  cat <<EOF
+version: "3.7"
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_PASSWORD=b2ecbaa44551df03fa3793b38091cff7
+      - POSTGRES_USER=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - GrowthNet
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
 
-# Iniciar o script
-main "$@"
+volumes:
+  postgres_data:
+    name: postgres_data
+
+networks:
+  GrowthNet:
+    external: true
+    name: GrowthNet
