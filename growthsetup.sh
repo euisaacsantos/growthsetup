@@ -3,8 +3,6 @@
 # Versão: 2.0 - Com verificações de falhas e recursos de recuperação
 # Data: 26/03/2025
 
-set -e
-
 # Cores para melhor visualização
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -52,6 +50,13 @@ handle_error() {
   fi
 }
 
+# Definir tratamento de erro global
+throw() {
+  local message="$1"
+  log "$message" "$RED"
+  return 1
+}
+
 # Verificar se está sendo executado como root
 if [ "$EUID" -ne 0 ]; then
   log "Este script precisa ser executado como root." "$RED"
@@ -89,16 +94,9 @@ reinstall_ubuntu() {
     cp -r /root/.credentials /backup/
   fi
   
-  # Em um ambiente real, aqui você usaria comandos específicos do seu provedor
-  # ou um script personalizado para reinstalar o sistema
   log "Em um ambiente de produção, este comando iniciaria uma reinstalação do sistema." "$YELLOW"
   log "Como isso é complexo e específico para cada ambiente, você precisará implementar esta função de acordo com sua infraestrutura." "$YELLOW"
   log "Após a reinstalação, execute este script novamente." "$YELLOW"
-  
-  # Código exemplo para ambientes especiais (descomente conforme necessário):
-  # DIGITALOCEAN_TOKEN="seu_token"
-  # DROPLET_ID=$(curl -s -X GET -H "Content-Type: application/json" -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" "https://api.digitalocean.com/v2/droplets" | jq -r ".droplets[] | select(.name==\"$(hostname)\") | .id")
-  # curl -X POST -H "Content-Type: application/json" -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" -d '{"type":"rebuild","image":"ubuntu-20-04-x64"}' "https://api.digitalocean.com/v2/droplets/$DROPLET_ID/actions"
   
   exit 1
 }
@@ -106,11 +104,9 @@ reinstall_ubuntu() {
 # Atualizar o sistema
 update_system() {
   log "Atualizando o sistema..."
-  {
-    apt update
-    apt upgrade -y
-    apt install -y curl wget apt-transport-https ca-certificates software-properties-common gnupg jq
-  } || handle_error "Falha ao atualizar o sistema" "atualização do sistema"
+  
+  apt update && apt upgrade -y
+  apt install -y curl wget apt-transport-https ca-certificates software-properties-common gnupg jq || handle_error "Falha ao atualizar o sistema" "atualização do sistema"
   
   log "Sistema atualizado com sucesso!"
 }
@@ -119,26 +115,24 @@ update_system() {
 install_docker() {
   log "Instalando Docker..."
   
-  {
-    # Remover versões antigas do Docker, se existirem
-    apt remove -y docker docker-engine docker.io containerd runc || true
-    
-    # Adicionar a chave GPG oficial do Docker
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-    
-    # Configurar o repositório estável do Docker
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
-    # Instalar Docker Engine
-    apt update
-    apt install -y docker-ce docker-ce-cli containerd.io
-    
-    # Iniciar e habilitar o Docker
-    systemctl enable --now docker
-    
-    # Verificar instalação
-    docker --version || throw "Docker não foi instalado corretamente"
-  } || handle_error "Falha ao instalar o Docker" "instalação do Docker"
+  # Remover versões antigas do Docker, se existirem
+  apt remove -y docker docker-engine docker.io containerd runc || true
+  
+  # Adicionar a chave GPG oficial do Docker
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  
+  # Configurar o repositório estável do Docker
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  
+  # Instalar Docker Engine
+  apt update
+  apt install -y docker-ce docker-ce-cli containerd.io || handle_error "Falha ao instalar o Docker" "instalação do Docker"
+  
+  # Iniciar e habilitar o Docker
+  systemctl enable --now docker
+  
+  # Verificar instalação
+  docker --version || throw "Docker não foi instalado corretamente"
   
   log "Docker instalado com sucesso!"
 }
@@ -147,47 +141,74 @@ install_docker() {
 init_swarm() {
   log "Inicializando o Docker Swarm..."
   
-  {
-    # Verificar se o Swarm já está inicializado
-    if docker info | grep -q "Swarm: active"; then
-      log "Docker Swarm já está ativo neste nó." "$YELLOW"
-    else
-      # Obter IP do servidor para o Swarm
-      SERVER_IP=$(hostname -I | awk '{print $1}')
-      
-      # Iniciar o Docker Swarm
-      docker swarm init --advertise-addr "$SERVER_IP"
-      
-      log "Docker Swarm inicializado com sucesso!"
-    fi
+  # Verificar se o Swarm já está inicializado
+  if docker info | grep -q "Swarm: active"; then
+    log "Docker Swarm já está ativo neste nó." "$YELLOW"
+  else
+    # Obter IP do servidor para o Swarm
+    SERVER_IP=$(hostname -I | awk '{print $1}')
     
-    # Criar rede para os serviços
-    if ! docker network ls | grep -q "traefik-public"; then
-      docker network create --driver=overlay traefik-public
-      log "Rede 'traefik-public' criada com sucesso!"
-    else
-      log "Rede 'traefik-public' já existe." "$YELLOW"
+    # Iniciar o Docker Swarm
+    docker swarm init --advertise-addr "$SERVER_IP" || handle_error "Falha ao inicializar o Docker Swarm" "inicialização do Swarm"
+    
+    log "Docker Swarm inicializado com sucesso!"
+  fi
+  
+  # Criar rede para os serviços
+  if ! docker network ls | grep -q "traefik-public"; then
+    docker network create --driver=overlay traefik-public || handle_error "Falha ao criar rede traefik-public" "criação de rede"
+    log "Rede 'traefik-public' criada com sucesso!"
+  else
+    log "Rede 'traefik-public' já existe." "$YELLOW"
+  fi
+}
+
+# Verificar configuração de DNS
+check_dns() {
+  log "Verificando configuração DNS para ${FULL_DOMAIN}..."
+  
+  # Registrar a tentativa de resolução
+  local dns_check=$(host ${FULL_DOMAIN} 2>&1 || true)
+  log "Resultado da verificação DNS: ${dns_check}" "$BLUE"
+  
+  if echo "$dns_check" | grep -q "NXDOMAIN" || echo "$dns_check" | grep -q "not found"; then
+    log "Aviso: Não foi possível resolver ${FULL_DOMAIN}." "$YELLOW"
+    log "Certifique-se de que o DNS está configurado corretamente apontando para o IP deste servidor." "$YELLOW"
+    log "Os certificados SSL não funcionarão até que o DNS esteja corretamente configurado." "$YELLOW"
+    
+    # Obter o IP do servidor
+    local server_ip=$(hostname -I | awk '{print $1}')
+    log "IP deste servidor: ${server_ip}" "$YELLOW"
+    log "Configure seu DNS para que ${FULL_DOMAIN} aponte para ${server_ip}" "$YELLOW"
+    
+    # Perguntar se deseja continuar
+    log "Deseja continuar mesmo assim? (s/n)" "$YELLOW"
+    read -r choice
+    if [[ ! "$choice" =~ ^[Ss]$ ]]; then
+      log "Instalação abortada pelo usuário." "$RED"
+      exit 1
     fi
-  } || handle_error "Falha ao inicializar o Docker Swarm" "inicialização do Swarm"
+  else
+    log "DNS para ${FULL_DOMAIN} está configurado corretamente!" "$GREEN"
+  fi
 }
 
 # Instalar e configurar Traefik
 install_traefik() {
   log "Instalando Traefik..."
   
-  {
-    # Remover instalação anterior se existir
-    docker service rm traefik || true
-    
-    # Esperar serviço ser removido
-    sleep 10
-    
-    # Criar diretórios para o Traefik
-    mkdir -p /opt/traefik/config
-    mkdir -p /opt/traefik/certificates
-    
-    # Criar arquivo de configuração dinâmica do Traefik
-    cat > /opt/traefik/config/dynamic.yml << EOF
+  # Remover instalação anterior se existir
+  docker service rm traefik || true
+  
+  # Esperar serviço ser removido
+  sleep 10
+  
+  # Criar diretórios para o Traefik
+  mkdir -p /opt/traefik/config
+  mkdir -p /opt/traefik/certificates
+  
+  # Criar arquivo de configuração dinâmica do Traefik
+  cat > /opt/traefik/config/dynamic.yml << EOF
 http:
   middlewares:
     secure-headers:
@@ -201,9 +222,9 @@ http:
     compress:
       compress: {}
 EOF
-    
-    # Criar arquivo de configuração estática do Traefik
-    cat > /opt/traefik/traefik.yml << EOF
+  
+  # Criar arquivo de configuração estática do Traefik
+  cat > /opt/traefik/traefik.yml << EOF
 global:
   checkNewVersion: true
   sendAnonymousUsage: false
@@ -247,37 +268,30 @@ providers:
     filename: /opt/traefik/config/dynamic.yml
     watch: true
 EOF
-    
-    # Criar arquivo acme.json para certificados
-    touch /opt/traefik/certificates/acme.json
-    chmod 600 /opt/traefik/certificates/acme.json
-    
-    # Usar versão específica do Traefik para maior estabilidade
-    docker service create \
-      --name traefik \
-      --constraint=node.role==manager \
-      --publish 80:80 \
-      --publish 443:443 \
-      --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
-      --mount type=bind,source=/opt/traefik/traefik.yml,target=/etc/traefik/traefik.yml \
-      --mount type=bind,source=/opt/traefik/config,target=/etc/traefik/config \
-      --mount type=bind,source=/opt/traefik/certificates,target=/etc/traefik/certificates \
-      --network traefik-public \
-      --label "traefik.enable=true" \
-      --label "traefik.http.routers.traefik-secure.entrypoints=websecure" \
-      --label "traefik.http.routers.traefik-secure.rule=Host(\`traefik.${DOMAIN}\`)" \
-      --label "traefik.http.routers.traefik-secure.tls=true" \
-      --label "traefik.http.routers.traefik-secure.service=api@internal" \
-      --label "traefik.http.routers.traefik-secure.middlewares=secure-headers" \
-      --label "traefik.http.services.traefik.loadbalancer.server.port=8080" \
-      traefik:v2.10.4
-    
-    # Verificar se o serviço foi criado com sucesso
-    sleep 10
-    if ! docker service ls | grep -q "traefik"; then
-      throw "Serviço Traefik não foi criado corretamente"
-    fi
-  } || handle_error "Falha ao instalar o Traefik" "instalação do Traefik"
+  
+  # Criar arquivo acme.json para certificados
+  touch /opt/traefik/certificates/acme.json
+  chmod 600 /opt/traefik/certificates/acme.json
+  
+  # Usar versão específica do Traefik para maior estabilidade
+  docker service create \
+    --name traefik \
+    --constraint=node.role==manager \
+    --publish 80:80 \
+    --publish 443:443 \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --mount type=bind,source=/opt/traefik/traefik.yml,target=/etc/traefik/traefik.yml \
+    --mount type=bind,source=/opt/traefik/config,target=/etc/traefik/config \
+    --mount type=bind,source=/opt/traefik/certificates,target=/etc/traefik/certificates \
+    --network traefik-public \
+    --label "traefik.enable=true" \
+    --label "traefik.http.routers.traefik-secure.entrypoints=websecure" \
+    --label "traefik.http.routers.traefik-secure.rule=Host(\`traefik.${DOMAIN}\`)" \
+    --label "traefik.http.routers.traefik-secure.tls=true" \
+    --label "traefik.http.routers.traefik-secure.service=api@internal" \
+    --label "traefik.http.routers.traefik-secure.middlewares=secure-headers" \
+    --label "traefik.http.services.traefik.loadbalancer.server.port=8080" \
+    traefik:v2.10.4 || handle_error "Falha ao criar serviço Traefik" "instalação do Traefik"
   
   log "Traefik instalado com sucesso!"
 }
@@ -286,55 +300,47 @@ EOF
 install_portainer() {
   log "Instalando Portainer com subdomínio: ${FULL_DOMAIN}..."
   
-  {
-    # Remover instalação anterior se existir
-    docker service rm portainer || true
-    
-    # Esperar serviço ser removido
-    sleep 10
-    
-    # Gerar senha inicial para o admin
-    ADMIN_PASSWORD=$(openssl rand -base64 12)
-    ADMIN_PASSWORD_HASH=$(docker run --rm httpd:2.4-alpine htpasswd -nbB admin "$ADMIN_PASSWORD" | cut -d ":" -f 2)
-    
-    # Criar diretório para dados do Portainer
-    mkdir -p /opt/portainer/data
-    
-    # Instalar uma versão específica do Portainer para maior estabilidade
-    docker service create \
-      --name portainer \
-      --constraint=node.role==manager \
-      --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
-      --mount type=bind,source=/opt/portainer/data,target=/data \
-      --network traefik-public \
-      --label "traefik.enable=true" \
-      --label "traefik.http.routers.portainer-secure.entrypoints=websecure" \
-      --label "traefik.http.routers.portainer-secure.rule=Host(\`${FULL_DOMAIN}\`)" \
-      --label "traefik.http.routers.portainer-secure.tls=true" \
-      --label "traefik.http.routers.portainer-secure.tls.certresolver=letsencrypt" \
-      --label "traefik.http.routers.portainer-secure.service=portainer" \
-      --label "traefik.http.services.portainer.loadbalancer.server.port=9000" \
-      --label "traefik.http.middlewares.portainer-secure.headers.sslredirect=true" \
-      portainer/portainer-ce:2.19.0 \
-      --admin-password="$ADMIN_PASSWORD_HASH"
-    
-    # Verificar se o serviço foi criado com sucesso
-    sleep 10
-    if ! docker service ls | grep -q "portainer"; then
-      throw "Serviço Portainer não foi criado corretamente"
-    fi
-    
-    # Salvar as credenciais em um arquivo seguro
-    mkdir -p /root/.credentials
-    chmod 700 /root/.credentials
-    cat > /root/.credentials/portainer.txt << EOF
+  # Remover instalação anterior se existir
+  docker service rm portainer || true
+  
+  # Esperar serviço ser removido
+  sleep 10
+  
+  # Gerar senha inicial para o admin
+  ADMIN_PASSWORD=$(openssl rand -base64 12)
+  ADMIN_PASSWORD_HASH=$(docker run --rm httpd:2.4-alpine htpasswd -nbB admin "$ADMIN_PASSWORD" | cut -d ":" -f 2)
+  
+  # Criar diretório para dados do Portainer
+  mkdir -p /opt/portainer/data
+  
+  # Instalar uma versão específica do Portainer para maior estabilidade
+  docker service create \
+    --name portainer \
+    --constraint=node.role==manager \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --mount type=bind,source=/opt/portainer/data,target=/data \
+    --network traefik-public \
+    --label "traefik.enable=true" \
+    --label "traefik.http.routers.portainer-secure.entrypoints=websecure" \
+    --label "traefik.http.routers.portainer-secure.rule=Host(\`${FULL_DOMAIN}\`)" \
+    --label "traefik.http.routers.portainer-secure.tls=true" \
+    --label "traefik.http.routers.portainer-secure.tls.certresolver=letsencrypt" \
+    --label "traefik.http.routers.portainer-secure.service=portainer" \
+    --label "traefik.http.services.portainer.loadbalancer.server.port=9000" \
+    --label "traefik.http.middlewares.portainer-secure.headers.sslredirect=true" \
+    portainer/portainer-ce:2.19.0 \
+    --admin-password="$ADMIN_PASSWORD_HASH" || handle_error "Falha ao criar serviço Portainer" "instalação do Portainer"
+  
+  # Salvar as credenciais em um arquivo seguro
+  mkdir -p /root/.credentials
+  chmod 700 /root/.credentials
+  cat > /root/.credentials/portainer.txt << EOF
 Portainer Admin Credentials
 URL: https://${FULL_DOMAIN}
 Username: admin
 Password: ${ADMIN_PASSWORD}
 EOF
-    chmod 600 /root/.credentials/portainer.txt
-  } || handle_error "Falha ao instalar o Portainer" "instalação do Portainer"
+  chmod 600 /root/.credentials/portainer.txt
   
   log "Portainer instalado com sucesso!"
   log "Credenciais salvas em: /root/.credentials/portainer.txt" "$YELLOW"
@@ -449,3 +455,55 @@ troubleshoot_services() {
     log "Diagnóstico concluído. Nenhuma ação adicional necessária." "$GREEN"
   fi
 }
+
+# Função principal de execução
+main() {
+  log "Iniciando configuração do ambiente..."
+  
+  # Verificar se a configuração já foi concluída
+  if [ -f "/root/.credentials/portainer.txt" ] && check_services; then
+    log "Ambiente já parece estar configurado e funcionando." "$YELLOW"
+    log "Deseja reinstalar todos os serviços? (s/n)" "$YELLOW"
+    read -r choice
+    if [[ ! "$choice" =~ ^[Ss]$ ]]; then
+      log "Instalação cancelada pelo usuário." "$GREEN"
+      exit 0
+    fi
+  fi
+  
+  # Início da instalação
+  update_system
+  install_docker
+  init_swarm
+  check_dns
+  install_traefik
+  install_portainer
+  
+  # Verificar se tudo está funcionando
+  if check_services; then
+    log "Configuração concluída com sucesso!" "$GREEN"
+    log "Portainer está disponível em: https://${FULL_DOMAIN}" "$GREEN"
+    log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+  else
+    log "Alguns serviços não estão funcionando corretamente." "$RED"
+    troubleshoot_services
+    
+    # Verificação final
+    if check_services; then
+      log "Todos os problemas foram resolvidos!" "$GREEN"
+      log "Configuração concluída com sucesso!" "$GREEN"
+      log "Portainer está disponível em: https://${FULL_DOMAIN}" "$GREEN"
+      log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+    else
+      log "Ainda existem problemas com os serviços." "$RED"
+      log "Verifique os logs e considere a opção de reinstalação ou entre em contato com o suporte." "$RED"
+      exit 1
+    fi
+  fi
+}
+
+# Captura de sinais para limpeza adequada
+trap 'log "Script interrompido pelo usuário. Limpando..."; exit 1' INT TERM
+
+# Executar a função principal - ESTA É A LINHA CHAVE QUE ESTAVA FALTANDO!
+main
