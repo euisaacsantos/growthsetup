@@ -1,22 +1,23 @@
 #!/bin/bash
 # Script para criar stack editável no Portainer - Versão para n8n
-# Uso: ./script.sh <portainer_url> <evolution_domain> [sufixo]
-# Exemplo: ./script.sh painel.trafegocomia.com api.trafegocomia.com cliente1
+# Uso: ./script.sh <portainer_url> <evolution_domain> <portainer_password> [sufixo]
+# Exemplo: ./script.sh painel.trafegocomia.com api.trafegocomia.com senha123 cliente1
 
 # Verificar parâmetros obrigatórios
-if [ $# -lt 2 ]; then
-    echo "Uso: $0 <portainer_url> <evolution_domain> [sufixo]"
-    echo "Exemplo: $0 painel.trafegocomia.com api.trafegocomia.com cliente1"
+if [ $# -lt 3 ]; then
+    echo "Uso: $0 <portainer_url> <evolution_domain> <portainer_password> [sufixo]"
+    echo "Exemplo: $0 painel.trafegocomia.com api.trafegocomia.com senha123 cliente1"
     exit 1
 fi
 
 # Capturar parâmetros da linha de comando
-PORTAINER_URL="https://$1"  # URL do Portainer
-EVOLUTION_DOMAIN="$2"       # Domínio para a Evolution API
+PORTAINER_URL="https://$1"        # URL do Portainer
+EVOLUTION_DOMAIN="$2"             # Domínio para a Evolution API
+PORTAINER_PASSWORD="$3"           # Senha do Portainer
 
 # Verificar se há sufixo (para múltiplas instâncias)
-if [ -n "$3" ]; then
-    SUFFIX="_$3"
+if [ -n "$4" ]; then
+    SUFFIX="_$4"
     echo "Instalando Evolution com sufixo: $SUFFIX"
 else
     SUFFIX=""
@@ -25,7 +26,6 @@ fi
 
 # Configurações adicionais
 PORTAINER_USER="admin"          # Usuário do Portainer (possibilidade de expansão para receber via parâmetro)
-PORTAINER_PASSWORD="suasenha"   # Senha do Portainer (possibilidade de expansão para receber via parâmetro)
 STACK_NAME="evolution${SUFFIX}" # Nome da stack com sufixo opcional
 
 # Cores para formatação
