@@ -9,20 +9,84 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configurações
-PORTAINER_URL="https://painel.trafegocomia.com"
-PORTAINER_USER="admin"
-PORTAINER_PASSWORD="fpU6TW3Dg7ulCL+k"
-DOMAIN="trafegocomia.com"
+# Configurações padrão
+PORTAINER_URL=""
+PORTAINER_USER=""
+PORTAINER_PASSWORD=""
+DOMAIN=""
 STACK_NAME="evolution-stack"
-ENDPOINT_ID=2  # ID do endpoint "local" identificado na sua instalação do Portainer
+ENDPOINT_ID=2  # ID do endpoint "local"
+DEBUG=false
 
 # Função para exibir mensagens
 log() {
   echo -e "${2:-$GREEN}[$(date '+%Y-%m-%d %H:%M:%S')] $1${NC}"
 }
 
+# Função para exibir uso
+usage() {
+  echo "Uso: $0 [opções]"
+  echo "Opções:"
+  echo "  --portainer-url URL      URL do Portainer (ex: https://painel.example.com)"
+  echo "  --portainer-user USER    Usuário do Portainer"
+  echo "  --portainer-password PWD Senha do Portainer"
+  echo "  --domain DOMAIN          Domínio principal (ex: example.com)"
+  echo "  --stack-name NAME        Nome do stack (padrão: evolution-stack)"
+  echo "  --endpoint-id ID         ID do endpoint no Portainer (padrão: 2)"
+  echo "  --debug                  Ativar modo debug"
+  echo "  --help                   Mostrar esta ajuda"
+  exit 1
+}
+
+# Processar argumentos
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --portainer-url)
+      PORTAINER_URL="$2"
+      shift 2
+      ;;
+    --portainer-user)
+      PORTAINER_USER="$2"
+      shift 2
+      ;;
+    --portainer-password)
+      PORTAINER_PASSWORD="$2"
+      shift 2
+      ;;
+    --domain)
+      DOMAIN="$2"
+      shift 2
+      ;;
+    --stack-name)
+      STACK_NAME="$2"
+      shift 2
+      ;;
+    --endpoint-id)
+      ENDPOINT_ID="$2"
+      shift 2
+      ;;
+    --debug)
+      DEBUG=true
+      shift
+      ;;
+    --help)
+      usage
+      ;;
+    *)
+      echo "Opção desconhecida: $1"
+      usage
+      ;;
+  esac
+done
+
+# Verificar argumentos obrigatórios
+if [ -z "$PORTAINER_URL" ] || [ -z "$PORTAINER_USER" ] || [ -z "$PORTAINER_PASSWORD" ] || [ -z "$DOMAIN" ]; then
+  log "Argumentos obrigatórios faltando!" "$RED"
+  usage
+fi
+
 # Criar conteúdo do docker-compose.yml
+log "Gerando arquivo docker-compose.yml..." "$BLUE"
 cat > ./docker-compose.yml << EOF
 version: '3.7'
 services:
@@ -127,9 +191,9 @@ EOF
 
 # Criar volumes se não existirem
 log "Verificando e criando volumes..." "$BLUE"
-docker volume create redis_data 2>/dev/null || log "Volume redis_data já existe." "$YELLOW"
-docker volume create postgres_data 2>/dev/null || log "Volume postgres_data já existe." "$YELLOW"
-docker volume create evolution_instances 2>/dev/null || log "Volume evolution_instances já existe." "$YELLOW"
+docker volume create redis_data
+docker volume create postgres_data
+docker volume create evolution_instances
 
 # Criar rede se não existir
 log "Verificando e criando rede..." "$BLUE"
@@ -141,6 +205,10 @@ AUTH_RESPONSE=$(curl -k -s -X POST "$PORTAINER_URL/api/auth" \
   -H "Content-Type: application/json" \
   -d "{\"Username\":\"$PORTAINER_USER\",\"Password\":\"$PORTAINER_PASSWORD\"}")
 
+if [ "$DEBUG" = true ]; then
+  echo "Resposta de autenticação: $AUTH_RESPONSE"
+fi
+
 JWT=$(echo $AUTH_RESPONSE | grep -o '"jwt":"[^"]*"' | cut -d'"' -f4)
 
 if [ -z "$JWT" ]; then
@@ -150,60 +218,40 @@ fi
 
 log "Autenticação bem-sucedida!" "$GREEN"
 
-# Primeiro, verificar se o stack já existe para removê-lo se necessário
+# Verificar se o stack já existe para removê-lo se necessário
 log "Verificando se o stack já existe..." "$BLUE"
 STACKS_RESPONSE=$(curl -k -s -X GET "$PORTAINER_URL/api/stacks" \
   -H "Authorization: Bearer $JWT")
 
+if [ "$DEBUG" = true ]; then
+  echo "Resposta de stacks: $STACKS_RESPONSE"
+fi
+
 # Extrair ID do stack, se existir
 STACK_ID=$(echo $STACKS_RESPONSE | jq -r ".[] | select(.Name == \"$STACK_NAME\") | .Id")
 
-if [ ! -z "$STACK_ID" ]; then
+if [ ! -z "$STACK_ID" ] && [ "$STACK_ID" != "null" ]; then
   log "Stack $STACK_NAME já existe com ID $STACK_ID. Removendo..." "$YELLOW"
-  curl -k -s -X DELETE "$PORTAINER_URL/api/stacks/$STACK_ID" \
-    -H "Authorization: Bearer $JWT"
+  REMOVE_RESPONSE=$(curl -k -s -X DELETE "$PORTAINER_URL/api/stacks/$STACK_ID" \
+    -H "Authorization: Bearer $JWT")
+  
+  if [ "$DEBUG" = true ]; then
+    echo "Resposta de remoção: $REMOVE_RESPONSE"
+  fi
   
   sleep 5 # Aguardar remoção
 fi
 
-# Criar um arquivo temporário com o conteúdo do docker-compose
-STACK_CONTENT=$(cat ./docker-compose.yml)
+# Alternativa: Usar docker stack deploy (mais confiável)
+log "Usando docker stack deploy para criar o stack..." "$BLUE"
+docker stack deploy -c ./docker-compose.yml "$STACK_NAME"
 
-# Criar o stack no Portainer usando o endpoint correto (2)
-log "Criando stack $STACK_NAME no Portainer..." "$BLUE"
-
-# Enviar o conteúdo do docker-compose para o Portainer
-RESPONSE=$(curl -k -s -X POST "$PORTAINER_URL/api/stacks" \
-  -H "Authorization: Bearer $JWT" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"Name\": \"$STACK_NAME\",
-    \"StackFileContent\": $(echo "$STACK_CONTENT" | jq -Rs .),
-    \"SwarmID\": \"default\",
-    \"Env\": [{\"name\":\"DOMAIN\", \"value\":\"$DOMAIN\"}],
-    \"EndpointId\": $ENDPOINT_ID,
-    \"FromAppTemplate\": false
-  }")
-
-# Verificar resposta
-echo "$RESPONSE" > /tmp/stack_response.json
-
-if echo "$RESPONSE" | grep -q "error"; then
-  ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message // "Erro desconhecido"')
-  log "Erro ao criar stack: $ERROR_MSG" "$RED"
+if [ $? -eq 0 ]; then
+  log "Stack $STACK_NAME criado com sucesso usando docker stack deploy!" "$GREEN"
+else
+  log "Falha ao criar o stack usando docker stack deploy!" "$RED"
   exit 1
 fi
-
-# Verificar se o stack foi criado
-NEW_STACK_ID=$(echo "$RESPONSE" | jq -r '.Id // ""')
-
-if [ -z "$NEW_STACK_ID" ] || [ "$NEW_STACK_ID" == "null" ]; then
-  log "Falha ao obter ID do stack criado" "$RED"
-  exit 1
-fi
-
-log "Stack $STACK_NAME criado com sucesso! ID: $NEW_STACK_ID" "$GREEN"
-log "Você pode gerenciá-lo pelo Portainer em: $PORTAINER_URL/#/stacks/$NEW_STACK_ID" "$GREEN"
 
 # Salvar credenciais
 mkdir -p /root/.credentials
@@ -219,3 +267,4 @@ chmod 600 /root/.credentials/evolution.txt
 
 log "Credenciais salvas em: /root/.credentials/evolution.txt" "$GREEN"
 log "Instalação concluída!" "$GREEN"
+log "Você pode gerenciar o stack pelo Portainer em: $PORTAINER_URL" "$GREEN"
