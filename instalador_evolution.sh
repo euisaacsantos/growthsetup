@@ -2,9 +2,9 @@
 # Script para criar stack Evolution, Redis e PostgreSQL via API do Portainer
 
 # Configurações
-PORTAINER_URL="https://painel.trafegocomia.com"  # Altere para a URL do seu Portainer
-PORTAINER_USER="admin"                 # Altere para seu usuário do Portainer
-PORTAINER_PASSWORD="suasenha"          # Altere para sua senha do Portainer
+PORTAINER_URL="https://painel.trafegocomia.com"  # URL do seu Portainer
+PORTAINER_USER="admin"                 # Seu usuário do Portainer
+PORTAINER_PASSWORD="suasenha"          # Sua senha do Portainer (altere aqui)
 PORTAINER_ENDPOINT_ID="1"              # ID do endpoint do Docker (normalmente 1 para o local)
 STACK_NAME="evolution-stack"           # Nome da stack
 
@@ -137,7 +137,7 @@ error_exit() {
 
 # Obter token JWT do Portainer
 echo "Autenticando no Portainer..."
-echo "Tentando acessar: ${PORTAINER_URL}/api/auth"
+echo "URL do Portainer: $PORTAINER_URL"
 
 # Usar curl com a opção -k para ignorar verificação de certificado
 AUTH_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/auth" \
@@ -153,12 +153,10 @@ echo "Código HTTP retornado: ${HTTP_CODE}"
 if [ "$HTTP_CODE" -ne 200 ]; then
     echo "Erro na autenticação. Resposta completa:"
     echo "$AUTH_RESPONSE"
-    echo "Verificando se o Portainer está acessível..."
-    curl -k -v "${PORTAINER_URL}" > /dev/null 2>&1
     
-    echo "Tentando alternativa com HTTP em vez de HTTPS..."
+    # Tentar alternativa com HTTP em vez de HTTPS
     PORTAINER_URL_HTTP=$(echo "$PORTAINER_URL" | sed 's/https:/http:/')
-    echo "Tentando acessar: ${PORTAINER_URL_HTTP}/api/auth"
+    echo "Tentando alternativa com HTTP: ${PORTAINER_URL_HTTP}/api/auth"
     
     AUTH_RESPONSE=$(curl -s -X POST "${PORTAINER_URL_HTTP}/api/auth" \
         -H "Content-Type: application/json" \
@@ -171,7 +169,7 @@ if [ "$HTTP_CODE" -ne 200 ]; then
     echo "Código HTTP alternativo: ${HTTP_CODE}"
     
     if [ "$HTTP_CODE" -ne 200 ]; then
-        error_exit "Autenticação falhou com ambos HTTPS e HTTP. Verifique a URL e credenciais do Portainer."
+        error_exit "Autenticação falhou. Verifique a URL, usuário e senha do Portainer."
     else
         echo "Conexão bem-sucedida usando HTTP. Continuando com HTTP..."
         PORTAINER_URL="$PORTAINER_URL_HTTP"
@@ -181,10 +179,10 @@ fi
 JWT_TOKEN=$(echo "$AUTH_BODY" | grep -o '"jwt":"[^"]*' | cut -d'"' -f4)
 
 if [ -z "$JWT_TOKEN" ]; then
-    error_exit "Não foi possível extrair o token JWT da resposta."
+    error_exit "Não foi possível extrair o token JWT da resposta: $AUTH_BODY"
 fi
 
-echo "Autenticação bem-sucedida."
+echo "Autenticação bem-sucedida. Token JWT obtido."
 
 # Obter ID do Swarm
 echo "Obtendo ID do Swarm..."
@@ -202,24 +200,41 @@ fi
 SWARM_ID=$(echo "$SWARM_BODY" | grep -o '"ID":"[^"]*' | cut -d'"' -f4)
 
 if [ -z "$SWARM_ID" ]; then
-    error_exit "Não foi possível extrair o ID do Swarm da resposta."
+    error_exit "Não foi possível extrair o ID do Swarm da resposta: $SWARM_BODY"
 fi
 
 echo "ID do Swarm: ${SWARM_ID}"
 
 # Criar a stack via API do Portainer
 echo "Criando stack ${STACK_NAME}..."
+
+# Verificar se jq está instalado
+if ! command -v jq &> /dev/null; then
+    echo "jq não está instalado. Instalando..."
+    apt-get update && apt-get install -y jq || {
+        echo "Falha ao instalar jq. Tentando outra abordagem..."
+        DOCKER_COMPOSE_ESC=$(echo "$DOCKER_COMPOSE" | sed 's/"/\\"/g' | tr -d '\n')
+        PAYLOAD="{\"Name\":\"${STACK_NAME}\",\"StackFileContent\":\"$DOCKER_COMPOSE_ESC\",\"SwarmID\":\"${SWARM_ID}\"}"
+    }
+else
+    PAYLOAD="{\"Name\":\"${STACK_NAME}\",\"StackFileContent\":$(echo "$DOCKER_COMPOSE" | jq -R -s .),\"SwarmID\":\"${SWARM_ID}\"}"
+fi
+
+echo "Enviando requisição para criar stack..."
 STACK_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/stacks?type=1&method=string&endpointId=${PORTAINER_ENDPOINT_ID}" \
     -H "Authorization: Bearer ${JWT_TOKEN}" \
     -H "Content-Type: application/json" \
-    -d "{\"Name\":\"${STACK_NAME}\",\"StackFileContent\":$(echo "$DOCKER_COMPOSE" | jq -R -s .),\"SwarmID\":\"${SWARM_ID}\"}" \
+    -d "$PAYLOAD" \
     -w "\n%{http_code}")
 
 HTTP_CODE=$(echo "$STACK_RESPONSE" | tail -n1)
 STACK_BODY=$(echo "$STACK_RESPONSE" | sed '$d')
 
+echo "Código HTTP da criação da stack: $HTTP_CODE"
 if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 201 ]; then
-    error_exit "Falha ao criar a stack. Código HTTP: ${HTTP_CODE}, Resposta: ${STACK_BODY}"
+    echo "Resposta completa:"
+    echo "$STACK_BODY"
+    error_exit "Falha ao criar a stack. Código HTTP: ${HTTP_CODE}"
 fi
 
 echo "Stack criada com sucesso!"
