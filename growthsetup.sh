@@ -218,6 +218,12 @@ install_traefik() {
   mkdir -p /opt/traefik/config
   mkdir -p /opt/traefik/certificates
   
+  # Verificar e garantir que o diretório existe
+  if [ ! -d "/opt/traefik/certificates" ]; then
+    log "Criando diretório para certificados..." "$YELLOW"
+    mkdir -p /opt/traefik/certificates
+  fi
+  
   # Criar arquivo de configuração dinâmica do Traefik
   cat > /opt/traefik/config/dynamic.yml << EOF
 http:
@@ -250,11 +256,6 @@ api:
 entryPoints:
   web:
     address: ":80"
-    http:
-      redirections:
-        entryPoint:
-          to: websecure
-          scheme: https
   
   websecure:
     address: ":443"
@@ -263,7 +264,7 @@ certificatesResolvers:
   letsencrypt:
     acme:
       email: ${EMAIL}
-      storage: /opt/traefik/certificates/acme.json
+      storage: /etc/traefik/certificates/acme.json
       httpChallenge:
         entryPoint: web
 
@@ -276,13 +277,16 @@ providers:
     network: traefik-public
   
   file:
-    filename: /opt/traefik/config/dynamic.yml
+    directory: /etc/traefik/config
     watch: true
 EOF
   
-  # Criar arquivo acme.json para certificados
+  # Criar arquivo acme.json para certificados com as permissões corretas
   touch /opt/traefik/certificates/acme.json
   chmod 600 /opt/traefik/certificates/acme.json
+  
+  # Garantir as permissões corretas no diretório de certificados
+  chmod -R 755 /opt/traefik/certificates
   
   # Usar versão específica do Traefik para maior estabilidade
   docker service create \
@@ -300,7 +304,7 @@ EOF
     --label "traefik.http.routers.traefik-secure.rule=Host(\`traefik.${DOMAIN}\`)" \
     --label "traefik.http.routers.traefik-secure.tls=true" \
     --label "traefik.http.routers.traefik-secure.service=api@internal" \
-    --label "traefik.http.routers.traefik-secure.middlewares=secure-headers" \
+    --label "traefik.http.routers.traefik-secure.middlewares=secure-headers@file" \
     --label "traefik.http.services.traefik.loadbalancer.server.port=8080" \
     traefik:v2.10.4 || handle_error "Falha ao criar serviço Traefik" "instalação do Traefik"
   
@@ -437,6 +441,14 @@ troubleshoot_services() {
   if ! docker network inspect traefik-public >/dev/null 2>&1; then
     log "Rede traefik-public não existe. Recriando..." "$RED"
     docker network create --driver=overlay traefik-public
+  fi
+  
+  # Verificar configuração dos certificados
+  log "Verificando configuração de certificados..."
+  if [ ! -f "/opt/traefik/certificates/acme.json" ]; then
+    log "Arquivo acme.json não encontrado. Criando..." "$RED"
+    touch /opt/traefik/certificates/acme.json
+    chmod 600 /opt/traefik/certificates/acme.json
   fi
   
   # Reiniciar serviços com problemas
