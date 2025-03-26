@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script para criar stack editável no Portainer - Versão para n8n
+# Script para criar stacks separadas no Portainer (Evolution, Redis e PostgreSQL)
 # Uso: ./script.sh <portainer_url> <evolution_domain> <portainer_password> [sufixo]
 # Exemplo: ./script.sh painel.trafegocomia.com api.trafegocomia.com senha123 cliente1
 
@@ -18,15 +18,17 @@ PORTAINER_PASSWORD="$3"           # Senha do Portainer
 # Verificar se há sufixo (para múltiplas instâncias)
 if [ -n "$4" ]; then
     SUFFIX="_$4"
-    echo "Instalando Evolution com sufixo: $SUFFIX"
+    echo "Instalando com sufixo: $SUFFIX"
 else
     SUFFIX=""
-    echo "Instalando primeira instância da Evolution (sem sufixo)"
+    echo "Instalando primeira instância (sem sufixo)"
 fi
 
 # Configurações adicionais
-PORTAINER_USER="admin"          # Usuário do Portainer (possibilidade de expansão para receber via parâmetro)
-STACK_NAME="evolution${SUFFIX}" # Nome da stack com sufixo opcional
+PORTAINER_USER="admin"              # Usuário do Portainer
+REDIS_STACK_NAME="redis${SUFFIX}"   # Nome da stack Redis
+PG_STACK_NAME="postgres${SUFFIX}"   # Nome da stack PostgreSQL
+EVO_STACK_NAME="evolution${SUFFIX}" # Nome da stack Evolution
 
 # Cores para formatação
 AMARELO="\e[33m"
@@ -54,9 +56,9 @@ docker volume create evolution_instances${SUFFIX} 2>/dev/null || echo "Volume ev
 # Criar rede overlay se não existir
 docker network create --driver overlay GrowthNet 2>/dev/null || echo "Rede GrowthNet já existe."
 
-# Criar arquivo docker-compose para a stack
-echo -e "${VERDE}Criando arquivo docker-compose para a stack...${RESET}"
-cat > "${STACK_NAME}.yaml" <<EOL
+# Criar arquivo docker-compose para a stack Redis
+echo -e "${VERDE}Criando arquivo docker-compose para a stack Redis...${RESET}"
+cat > "${REDIS_STACK_NAME}.yaml" <<EOL
 version: '3.7'
 services:
   redis${SUFFIX}:
@@ -73,6 +75,20 @@ services:
         constraints:
         - node.role == manager
 
+volumes:
+  redis_data${SUFFIX}:
+    external: true
+
+networks:
+  GrowthNet:
+    external: true
+EOL
+
+# Criar arquivo docker-compose para a stack PostgreSQL
+echo -e "${VERDE}Criando arquivo docker-compose para a stack PostgreSQL...${RESET}"
+cat > "${PG_STACK_NAME}.yaml" <<EOL
+version: '3.7'
+services:
   postgres${SUFFIX}:
     image: postgres:13
     environment:
@@ -89,6 +105,20 @@ services:
         constraints:
         - node.role == manager
 
+volumes:
+  postgres_data${SUFFIX}:
+    external: true
+
+networks:
+  GrowthNet:
+    external: true
+EOL
+
+# Criar arquivo docker-compose para a stack Evolution
+echo -e "${VERDE}Criando arquivo docker-compose para a stack Evolution...${RESET}"
+cat > "${EVO_STACK_NAME}.yaml" <<EOL
+version: '3.7'
+services:
   evolution${SUFFIX}:
     image: atendai/evolution-api:latest
     volumes:
@@ -146,10 +176,6 @@ services:
       - traefik.http.services.evolution${SUFFIX}.loadbalancer.server.port=8080
 
 volumes:
-  redis_data${SUFFIX}:
-    external: true
-  postgres_data${SUFFIX}:
-    external: true
   evolution_instances${SUFFIX}:
     external: true
 
@@ -262,109 +288,145 @@ fi
 
 echo -e "ID do Swarm: ${BEGE}${SWARM_ID}${RESET}"
 
-# Verificar se a stack já existe
-echo -e "${VERDE}Verificando se já existe uma stack com o nome ${STACK_NAME}...${RESET}"
-STACK_LIST_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/stacks" \
-    -H "Authorization: Bearer ${JWT_TOKEN}" \
-    -w "\n%{http_code}")
-
-HTTP_CODE=$(echo "$STACK_LIST_RESPONSE" | tail -n1)
-STACK_LIST_BODY=$(echo "$STACK_LIST_RESPONSE" | sed '$d')
-
-if [ "$HTTP_CODE" -ne 200 ]; then
-    echo -e "${AMARELO}Aviso: Não foi possível verificar stacks existentes. Código HTTP: ${HTTP_CODE}${RESET}"
-    echo "Continuando mesmo assim..."
-else
-    # Verificar se uma stack com o mesmo nome já existe
-    EXISTING_STACK_ID=$(echo "$STACK_LIST_BODY" | grep -o "\"Id\":[0-9]*,\"Name\":\"${STACK_NAME}\"" | grep -o '"Id":[0-9]*' | grep -o '[0-9]*')
+# Função para processar a criação ou atualização de uma stack
+process_stack() {
+    local stack_name=$1
+    local yaml_file="${stack_name}.yaml"
     
-    if [ ! -z "$EXISTING_STACK_ID" ]; then
-        echo -e "${AMARELO}Uma stack com o nome '${STACK_NAME}' já existe (ID: ${EXISTING_STACK_ID})${RESET}"
-        echo -e "${VERDE}Removendo a stack existente para recriá-la...${RESET}"
-        
-        # Remover a stack existente
-        DELETE_RESPONSE=$(curl -k -s -X DELETE "${PORTAINER_URL}/api/stacks/${EXISTING_STACK_ID}?endpointId=${ENDPOINT_ID}" \
-            -H "Authorization: Bearer ${JWT_TOKEN}" \
-            -w "\n%{http_code}")
-        
-        HTTP_CODE=$(echo "$DELETE_RESPONSE" | tail -n1)
-        DELETE_BODY=$(echo "$DELETE_RESPONSE" | sed '$d')
-        
-        if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 204 ]; then
-            echo -e "${AMARELO}Aviso: Não foi possível remover a stack existente. Código HTTP: ${HTTP_CODE}${RESET}"
-            echo "Continuando mesmo assim..."
-        else
-            echo -e "${VERDE}Stack existente removida com sucesso.${RESET}"
-        fi
-        
-        # Aguardar um momento para garantir que a stack foi removida
-        sleep 3
-    fi
-fi
+    echo -e "${VERDE}Processando stack: ${BEGE}${stack_name}${RESET}"
+    
+    # Verificar se a stack já existe
+    STACK_LIST_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/stacks" \
+        -H "Authorization: Bearer ${JWT_TOKEN}" \
+        -w "\n%{http_code}")
 
-# Criar arquivo temporário para capturar a saída de erro e a resposta
-erro_output=$(mktemp)
-response_output=$(mktemp)
+    HTTP_CODE=$(echo "$STACK_LIST_RESPONSE" | tail -n1)
+    STACK_LIST_BODY=$(echo "$STACK_LIST_RESPONSE" | sed '$d')
 
-# Enviar a stack usando o endpoint multipart do Portainer
-echo -e "${VERDE}Enviando a stack para o Portainer...${RESET}"
-http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
-  -H "Authorization: Bearer ${JWT_TOKEN}" \
-  -F "Name=${STACK_NAME}" \
-  -F "file=@$(pwd)/${STACK_NAME}.yaml" \
-  -F "SwarmID=${SWARM_ID}" \
-  -F "endpointId=${ENDPOINT_ID}" \
-  "${PORTAINER_URL}/api/stacks/create/swarm/file" 2> "$erro_output")
-
-response_body=$(cat "$response_output")
-
-if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    # Verifica o conteúdo da resposta para garantir que o deploy foi bem-sucedido
-    if echo "$response_body" | grep -q "\"Id\""; then
-        echo -e "${VERDE}Deploy da stack ${BEGE}${STACK_NAME}${RESET}${VERDE} feito com sucesso!${RESET}"
+    if [ "$HTTP_CODE" -ne 200 ]; then
+        echo -e "${AMARELO}Aviso: Não foi possível verificar stacks existentes. Código HTTP: ${HTTP_CODE}${RESET}"
+        echo "Continuando mesmo assim..."
     else
-        echo -e "${VERMELHO}Erro, resposta inesperada do servidor ao tentar efetuar deploy da stack ${BEGE}${STACK_NAME}${RESET}.${RESET}"
-        echo "Resposta do servidor: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        # Verificar se uma stack com o mesmo nome já existe
+        EXISTING_STACK_ID=$(echo "$STACK_LIST_BODY" | grep -o "\"Id\":[0-9]*,\"Name\":\"${stack_name}\"" | grep -o '"Id":[0-9]*' | grep -o '[0-9]*')
+        
+        if [ ! -z "$EXISTING_STACK_ID" ]; then
+            echo -e "${AMARELO}Uma stack com o nome '${stack_name}' já existe (ID: ${EXISTING_STACK_ID})${RESET}"
+            echo -e "${VERDE}Removendo a stack existente para recriá-la...${RESET}"
+            
+            # Remover a stack existente
+            DELETE_RESPONSE=$(curl -k -s -X DELETE "${PORTAINER_URL}/api/stacks/${EXISTING_STACK_ID}?endpointId=${ENDPOINT_ID}" \
+                -H "Authorization: Bearer ${JWT_TOKEN}" \
+                -w "\n%{http_code}")
+            
+            HTTP_CODE=$(echo "$DELETE_RESPONSE" | tail -n1)
+            DELETE_BODY=$(echo "$DELETE_RESPONSE" | sed '$d')
+            
+            if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 204 ]; then
+                echo -e "${AMARELO}Aviso: Não foi possível remover a stack existente. Código HTTP: ${HTTP_CODE}${RESET}"
+                echo "Continuando mesmo assim..."
+            else
+                echo -e "${VERDE}Stack existente removida com sucesso.${RESET}"
+            fi
+            
+            # Aguardar um momento para garantir que a stack foi removida
+            sleep 3
+        fi
     fi
-else
-    echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
-    echo "Mensagem de erro: $(cat "$erro_output")"
-    echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
-    
-    # Tentar método alternativo se falhar
-    echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
-    # Tenta com outro endpoint do Portainer (método 2)
+
+    # Criar arquivo temporário para capturar a saída de erro e a resposta
+    erro_output=$(mktemp)
+    response_output=$(mktemp)
+
+    # Enviar a stack usando o endpoint multipart do Portainer
+    echo -e "${VERDE}Enviando a stack ${stack_name} para o Portainer...${RESET}"
     http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
       -H "Authorization: Bearer ${JWT_TOKEN}" \
-      -H "Content-Type: multipart/form-data" \
-      -F "Name=${STACK_NAME}" \
-      -F "file=@$(pwd)/${STACK_NAME}.yaml" \
+      -F "Name=${stack_name}" \
+      -F "file=@$(pwd)/${yaml_file}" \
       -F "SwarmID=${SWARM_ID}" \
       -F "endpointId=${ENDPOINT_ID}" \
-      "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
-    
+      "${PORTAINER_URL}/api/stacks/create/swarm/file" 2> "$erro_output")
+
     response_body=$(cat "$response_output")
-    
+
     if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-        echo -e "${VERDE}Deploy da stack ${BEGE}${STACK_NAME}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
+        # Verifica o conteúdo da resposta para garantir que o deploy foi bem-sucedido
+        if echo "$response_body" | grep -q "\"Id\""; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso!${RESET}"
+            return 0
+        else
+            echo -e "${VERMELHO}Erro, resposta inesperada do servidor ao tentar efetuar deploy da stack ${BEGE}${stack_name}${RESET}.${RESET}"
+            echo "Resposta do servidor: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        fi
     else
-        echo -e "${VERMELHO}Erro ao efetuar deploy pelo método alternativo. Resposta HTTP: ${http_code}${RESET}"
+        echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
         echo "Mensagem de erro: $(cat "$erro_output")"
         echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
         
-        # Último recurso - usar o Docker diretamente
-        echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
-        if docker stack deploy --prune --resolve-image always -c "${STACK_NAME}.yaml" "${STACK_NAME}"; then
-            echo -e "${VERDE}Deploy da stack ${BEGE}${STACK_NAME}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
-            echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
+        # Tentar método alternativo se falhar
+        echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
+        # Tenta com outro endpoint do Portainer (método 2)
+        http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+          -H "Authorization: Bearer ${JWT_TOKEN}" \
+          -H "Content-Type: multipart/form-data" \
+          -F "Name=${stack_name}" \
+          -F "file=@$(pwd)/${yaml_file}" \
+          -F "SwarmID=${SWARM_ID}" \
+          -F "endpointId=${ENDPOINT_ID}" \
+          "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
+        
+        response_body=$(cat "$response_output")
+        
+        if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
+            return 0
         else
-            error_exit "Falha em todos os métodos de deploy da stack."
+            echo -e "${VERMELHO}Erro ao efetuar deploy pelo método alternativo. Resposta HTTP: ${http_code}${RESET}"
+            echo "Mensagem de erro: $(cat "$erro_output")"
+            echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+            
+            # Último recurso - usar o Docker diretamente
+            echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
+            if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
+                echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+                echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
+                return 0
+            else
+                echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
+                return 1
+            fi
         fi
     fi
+
+    # Remove os arquivos temporários
+    rm -f "$erro_output" "$response_output"
+}
+
+# Implementar stacks na ordem correta: primeiro Redis e PostgreSQL, depois Evolution
+echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
+
+# Processar Redis primeiro
+process_stack "$REDIS_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar Redis, mas continuando...${RESET}"
 fi
 
-# Remove os arquivos temporários
-rm -f "$erro_output" "$response_output"
+# Processar PostgreSQL segundo
+process_stack "$PG_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar PostgreSQL, mas continuando...${RESET}"
+fi
+
+# Processar Evolution por último (depende dos outros)
+# Adicionar uma pausa para garantir que os serviços anteriores sejam inicializados
+echo -e "${VERDE}Aguardando 10 segundos para inicialização dos serviços Redis e PostgreSQL...${RESET}"
+sleep 10
+
+process_stack "$EVO_STACK_NAME"
+if [ $? -ne 0 ]; then
+    error_exit "Falha ao implementar a stack Evolution."
+fi
 
 # Salvar credenciais
 CREDENTIALS_DIR="/root/.credentials"
@@ -383,23 +445,28 @@ else
     echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
 fi
 
+# Criar um objeto JSON de saída para o n8n
+cat << EOF > /tmp/evolution${SUFFIX}_output.json
+{
+  "url": "https://${EVOLUTION_DOMAIN}",
+  "apiKey": "${API_KEY}",
+  "managerUrl": "https://${EVOLUTION_DOMAIN}/manager",
+  "redisStackName": "${REDIS_STACK_NAME}",
+  "postgresStackName": "${PG_STACK_NAME}",
+  "evolutionStackName": "${EVO_STACK_NAME}",
+  "databaseUri": "postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres${SUFFIX}:5432/evolution${SUFFIX}"
+}
+EOF
+
+echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/evolution${SUFFIX}_output.json${RESET}"
+
 echo "---------------------------------------------"
 echo -e "${VERDE}[ EVOLUTION API - INSTALAÇÃO COMPLETA ]${RESET}"
 echo -e "${VERDE}URL da API:${RESET} https://${EVOLUTION_DOMAIN}"
 echo -e "${VERDE}API Key:${RESET} ${API_KEY}"
 echo -e "${VERDE}Link do Manager:${RESET} https://${EVOLUTION_DOMAIN}/manager"
-echo -e "${VERDE}Stack ${STACK_NAME} criada com sucesso via API do Portainer!${RESET}"
-echo -e "${VERDE}A stack está disponível e editável no Portainer.${RESET}"
-
-# Criar um objeto JSON de saída para o n8n
-cat << EOF > /tmp/evolution_output.json
-{
-  "url": "https://${EVOLUTION_DOMAIN}",
-  "apiKey": "${API_KEY}",
-  "managerUrl": "https://${EVOLUTION_DOMAIN}/manager",
-  "stackName": "${STACK_NAME}",
-  "databaseUri": "postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres${SUFFIX}:5432/evolution${SUFFIX}"
-}
-EOF
-
-echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/evolution_output.json${RESET}"
+echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
+echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${EVO_STACK_NAME}${RESET}"
+echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
