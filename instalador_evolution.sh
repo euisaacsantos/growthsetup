@@ -4,7 +4,7 @@
 # Configurações
 PORTAINER_URL="https://painel.trafegocomia.com" # URL do Portainer (sem https://)
 PORTAINER_USER="admin"                          # Usuário do Portainer
-PORTAINER_PASSWORD="fpU6TW3Dg7ulCL+k"                   # Senha do Portainer
+PORTAINER_PASSWORD="y7fNMVEpeJVEsVAw"                   # Senha do Portainer
 STACK_NAME="evolution-stack"                    # Nome da stack
 EVOLUTION_DOMAIN="api.trafegocomia.com"         # Domínio para a Evolution API
 
