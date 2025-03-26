@@ -2,7 +2,7 @@
 # Script para criar stack Evolution, Redis e PostgreSQL via API do Portainer
 
 # Configurações
-PORTAINER_URL="https://localhost:9000"  # Altere para a URL do seu Portainer
+PORTAINER_URL="https://painel.trafegocomia.com"  # Altere para a URL do seu Portainer
 PORTAINER_USER="admin"                 # Altere para seu usuário do Portainer
 PORTAINER_PASSWORD="suasenha"          # Altere para sua senha do Portainer
 PORTAINER_ENDPOINT_ID="1"              # ID do endpoint do Docker (normalmente 1 para o local)
