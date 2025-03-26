@@ -1,31 +1,42 @@
 #!/bin/bash
-# Script para criar stack Evolution, Redis e PostgreSQL via API do Portainer
+# Script para criar stack editável no Portainer (Evolution API + Redis + PostgreSQL)
 
 # Configurações
-PORTAINER_URL="https://painel.trafegocomia.com"  # URL do seu Portainer
-PORTAINER_USER="admin"                  # Seu usuário do Portainer
-PORTAINER_PASSWORD="fpU6TW3Dg7ulCL+k"           # Sua senha do Portainer (altere aqui)
-STACK_NAME="evolution-stack2"            # Nome da stack
+PORTAINER_URL="https://painel.trafegocomia.com" # URL do Portainer (sem https://)
+PORTAINER_USER="admin"                          # Usuário do Portainer
+PORTAINER_PASSWORD="suasenha"                   # Senha do Portainer
+STACK_NAME="evolution-stack"                    # Nome da stack
+EVOLUTION_DOMAIN="api.trafegocomia.com"         # Domínio para a Evolution API
+
+# Cores para formatação
+AMARELO="\e[33m"
+VERDE="\e[32m"
+VERMELHO="\e[31m"
+RESET="\e[0m"
+BEGE="\e[97m"
 
 # Gerar uma chave API aleatória para a Evolution
 API_KEY=$(openssl rand -hex 16)
-echo "Chave API gerada: $API_KEY"
+echo -e "${VERDE}Chave API gerada: ${RESET}${API_KEY}"
 
-# Criar volumes (opcional, se você tiver acesso ao Docker direto)
-if command -v docker &> /dev/null; then
-    echo "Criando volumes Docker..."
-    docker volume create redis_data 2>/dev/null || echo "Volume redis_data já existe."
-    docker volume create postgres_data 2>/dev/null || echo "Volume postgres_data já existe."
-    docker volume create evolution_instances 2>/dev/null || echo "Volume evolution_instances já existe."
-    
-    # Criar rede (opcional)
-    docker network create --driver overlay GrowthNet 2>/dev/null || echo "Rede GrowthNet já existe."
-else
-    echo "Docker não encontrado. Os volumes precisarão ser criados manualmente."
-fi
+# Função para exibir erros e sair
+error_exit() {
+    echo -e "${VERMELHO}ERRO: $1${RESET}" >&2
+    exit 1
+}
 
-# Conteúdo do Docker Compose para a stack
-DOCKER_COMPOSE=$(cat <<EOF
+# Criar volumes Docker necessários
+echo -e "${VERDE}Criando volumes Docker...${RESET}"
+docker volume create redis_data 2>/dev/null || echo "Volume redis_data já existe."
+docker volume create postgres_data 2>/dev/null || echo "Volume postgres_data já existe."
+docker volume create evolution_instances 2>/dev/null || echo "Volume evolution_instances já existe."
+
+# Criar rede overlay se não existir
+docker network create --driver overlay GrowthNet 2>/dev/null || echo "Rede GrowthNet já existe."
+
+# Criar arquivo docker-compose para a stack
+echo -e "${VERDE}Criando arquivo docker-compose para a stack...${RESET}"
+cat > "${STACK_NAME}.yaml" <<EOL
 version: '3.7'
 services:
   redis:
@@ -65,7 +76,7 @@ services:
     networks:
       - GrowthNet
     environment:
-      - SERVER_URL=https://api.trafegocomia.com
+      - SERVER_URL=https://${EVOLUTION_DOMAIN}
       - AUTHENTICATION_API_KEY=${API_KEY}
       - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
       - DEL_INSTANCE=false
@@ -107,7 +118,7 @@ services:
         - node.role == manager
       labels:
       - traefik.enable=true
-      - traefik.http.routers.evolution.rule=Host(\`api.trafegocomia.com\`)
+      - traefik.http.routers.evolution.rule=Host(\`${EVOLUTION_DOMAIN}\`)
       - traefik.http.routers.evolution.entrypoints=websecure
       - traefik.http.routers.evolution.priority=1
       - traefik.http.routers.evolution.tls.certresolver=letsencryptresolver
@@ -125,18 +136,19 @@ volumes:
 networks:
   GrowthNet:
     external: true
-EOF
-)
+EOL
 
-# Função para exibir erros e sair
-error_exit() {
-    echo "ERRO: $1" >&2
-    exit 1
-}
+# Verificar se jq está instalado
+if ! command -v jq &> /dev/null; then
+    echo -e "${VERDE}Instalando jq...${RESET}"
+    apt-get update && apt-get install -y jq || {
+        error_exit "Falha ao instalar jq. Necessário para processamento de JSON."
+    }
+fi
 
 # Obter token JWT do Portainer
-echo "Autenticando no Portainer..."
-echo "URL do Portainer: $PORTAINER_URL"
+echo -e "${VERDE}Autenticando no Portainer...${RESET}"
+echo -e "URL do Portainer: ${BEGE}${PORTAINER_URL}${RESET}"
 
 # Usar curl com a opção -k para ignorar verificação de certificado
 AUTH_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/auth" \
@@ -147,7 +159,7 @@ AUTH_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/auth" \
 HTTP_CODE=$(echo "$AUTH_RESPONSE" | tail -n1)
 AUTH_BODY=$(echo "$AUTH_RESPONSE" | sed '$d')
 
-echo "Código HTTP retornado: ${HTTP_CODE}"
+echo -e "Código HTTP retornado: ${BEGE}${HTTP_CODE}${RESET}"
 
 if [ "$HTTP_CODE" -ne 200 ]; then
     echo "Erro na autenticação. Resposta completa:"
@@ -181,10 +193,10 @@ if [ -z "$JWT_TOKEN" ]; then
     error_exit "Não foi possível extrair o token JWT da resposta: $AUTH_BODY"
 fi
 
-echo "Autenticação bem-sucedida. Token JWT obtido."
+echo -e "${VERDE}Autenticação bem-sucedida. Token JWT obtido.${RESET}"
 
 # Listar endpoints disponíveis
-echo "Listando endpoints disponíveis..."
+echo -e "${VERDE}Listando endpoints disponíveis...${RESET}"
 ENDPOINTS_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/endpoints" \
     -H "Authorization: Bearer ${JWT_TOKEN}" \
     -w "\n%{http_code}")
@@ -196,28 +208,29 @@ if [ "$HTTP_CODE" -ne 200 ]; then
     error_exit "Falha ao listar endpoints. Código HTTP: ${HTTP_CODE}, Resposta: ${ENDPOINTS_BODY}"
 fi
 
-echo "Endpoints disponíveis:"
-echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*,"Name":"[^"]*' | sed 's/"Id":\([0-9]*\),"Name":"\([^"]*\)"/ID: \1, Nome: \2/'
+echo -e "${VERDE}Endpoints disponíveis:${RESET}"
+ENDPOINTS_LIST=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*,"Name":"[^"]*' | sed 's/"Id":\([0-9]*\),"Name":"\([^"]*\)"/ID: \1, Nome: \2/')
+echo "$ENDPOINTS_LIST"
 
 # Solicitar ID do endpoint
 echo ""
-echo "Por favor, informe o ID do endpoint que deseja usar (número ID mostrado acima):"
-read -p "ID do endpoint: " PORTAINER_ENDPOINT_ID
+echo -e "${VERDE}Por favor, informe o ID do endpoint que deseja usar (número ID mostrado acima):${RESET}"
+read -p "ID do endpoint: " ENDPOINT_ID
 
-if [ -z "$PORTAINER_ENDPOINT_ID" ]; then
+if [ -z "$ENDPOINT_ID" ]; then
     # Tentar extrair automaticamente o primeiro endpoint
-    PORTAINER_ENDPOINT_ID=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*' | head -1 | grep -o '[0-9]*')
+    ENDPOINT_ID=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*' | head -1 | grep -o '[0-9]*')
     
-    if [ -z "$PORTAINER_ENDPOINT_ID" ]; then
+    if [ -z "$ENDPOINT_ID" ]; then
         error_exit "Nenhum ID de endpoint fornecido e não foi possível extrair automaticamente."
     else
-        echo "Usando o primeiro endpoint disponível (ID: $PORTAINER_ENDPOINT_ID)"
+        echo -e "Usando o primeiro endpoint disponível (ID: ${BEGE}${ENDPOINT_ID}${RESET})"
     fi
 fi
 
 # Verificar se o endpoint está em Swarm mode
-echo "Verificando se o endpoint está em modo Swarm..."
-SWARM_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/endpoints/${PORTAINER_ENDPOINT_ID}/docker/swarm" \
+echo -e "${VERDE}Verificando se o endpoint está em modo Swarm...${RESET}"
+SWARM_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/endpoints/${ENDPOINT_ID}/docker/swarm" \
     -H "Authorization: Bearer ${JWT_TOKEN}" \
     -w "\n%{http_code}")
 
@@ -234,41 +247,142 @@ if [ -z "$SWARM_ID" ]; then
     error_exit "Não foi possível extrair o ID do Swarm. O endpoint selecionado está em modo Swarm?"
 fi
 
-echo "ID do Swarm: ${SWARM_ID}"
+echo -e "ID do Swarm: ${BEGE}${SWARM_ID}${RESET}"
 
-# Criar a stack via API do Portainer
-echo "Criando stack ${STACK_NAME}..."
-
-# Verificar se jq está instalado
-if ! command -v jq &> /dev/null; then
-    echo "jq não está instalado. Instalando..."
-    apt-get update && apt-get install -y jq || {
-        echo "Falha ao instalar jq. Tentando outra abordagem..."
-        DOCKER_COMPOSE_ESC=$(echo "$DOCKER_COMPOSE" | sed 's/"/\\"/g' | tr -d '\n')
-        PAYLOAD="{\"Name\":\"${STACK_NAME}\",\"StackFileContent\":\"$DOCKER_COMPOSE_ESC\",\"SwarmID\":\"${SWARM_ID}\"}"
-    }
-else
-    PAYLOAD="{\"Name\":\"${STACK_NAME}\",\"StackFileContent\":$(echo "$DOCKER_COMPOSE" | jq -R -s .),\"SwarmID\":\"${SWARM_ID}\"}"
-fi
-
-echo "Enviando requisição para criar stack..."
-STACK_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/stacks?type=1&method=string&endpointId=${PORTAINER_ENDPOINT_ID}" \
+# Verificar se a stack já existe
+echo -e "${VERDE}Verificando se já existe uma stack com o nome ${STACK_NAME}...${RESET}"
+STACK_LIST_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/stacks" \
     -H "Authorization: Bearer ${JWT_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$PAYLOAD" \
     -w "\n%{http_code}")
 
-HTTP_CODE=$(echo "$STACK_RESPONSE" | tail -n1)
-STACK_BODY=$(echo "$STACK_RESPONSE" | sed '$d')
+HTTP_CODE=$(echo "$STACK_LIST_RESPONSE" | tail -n1)
+STACK_LIST_BODY=$(echo "$STACK_LIST_RESPONSE" | sed '$d')
 
-echo "Código HTTP da criação da stack: $HTTP_CODE"
-if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 201 ]; then
-    echo "Resposta completa:"
-    echo "$STACK_BODY"
-    error_exit "Falha ao criar a stack. Código HTTP: ${HTTP_CODE}"
+if [ "$HTTP_CODE" -ne 200 ]; then
+    echo -e "${AMARELO}Aviso: Não foi possível verificar stacks existentes. Código HTTP: ${HTTP_CODE}${RESET}"
+    echo "Continuando mesmo assim..."
+else
+    # Verificar se uma stack com o mesmo nome já existe
+    EXISTING_STACK_ID=$(echo "$STACK_LIST_BODY" | grep -o "\"Id\":[0-9]*,\"Name\":\"${STACK_NAME}\"" | grep -o '"Id":[0-9]*' | grep -o '[0-9]*')
+    
+    if [ ! -z "$EXISTING_STACK_ID" ]; then
+        echo -e "${AMARELO}Uma stack com o nome '${STACK_NAME}' já existe (ID: ${EXISTING_STACK_ID})${RESET}"
+        echo "Opções:"
+        echo "1. Atualizar a stack existente"
+        echo "2. Criar uma nova stack com um nome diferente"
+        echo "3. Sair"
+        read -p "Escolha uma opção (1-3): " STACK_OPTION
+        
+        case $STACK_OPTION in
+            1)
+                echo -e "${VERDE}Atualizando stack existente...${RESET}"
+                
+                # Remover a stack existente
+                echo -e "${VERDE}Removendo a stack existente para recriá-la...${RESET}"
+                DELETE_RESPONSE=$(curl -k -s -X DELETE "${PORTAINER_URL}/api/stacks/${EXISTING_STACK_ID}?endpointId=${ENDPOINT_ID}" \
+                    -H "Authorization: Bearer ${JWT_TOKEN}" \
+                    -w "\n%{http_code}")
+                
+                HTTP_CODE=$(echo "$DELETE_RESPONSE" | tail -n1)
+                DELETE_BODY=$(echo "$DELETE_RESPONSE" | sed '$d')
+                
+                if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 204 ]; then
+                    echo -e "${AMARELO}Aviso: Não foi possível remover a stack existente. Código HTTP: ${HTTP_CODE}${RESET}"
+                    echo "Continuando mesmo assim..."
+                else
+                    echo -e "${VERDE}Stack existente removida com sucesso.${RESET}"
+                fi
+                
+                # Aguardar um momento para garantir que a stack foi removida
+                sleep 3
+                ;;
+            2)
+                echo -e "${VERDE}Criando stack com um novo nome...${RESET}"
+                read -p "Informe o novo nome para a stack: " NEW_STACK_NAME
+                if [ -z "$NEW_STACK_NAME" ]; then
+                    NEW_STACK_NAME="${STACK_NAME}-$(date +%Y%m%d%H%M%S)"
+                    echo -e "Usando nome gerado automaticamente: ${BEGE}${NEW_STACK_NAME}${RESET}"
+                fi
+                STACK_NAME="$NEW_STACK_NAME"
+                
+                # Atualizar o nome no arquivo yaml
+                mv "${STACK_NAME}.yaml" "${NEW_STACK_NAME}.yaml"
+                STACK_NAME="${NEW_STACK_NAME}"
+                ;;
+            3)
+                echo -e "${VERDE}Operação cancelada pelo usuário.${RESET}"
+                exit 0
+                ;;
+            *)
+                error_exit "Opção inválida."
+                ;;
+        esac
+    fi
 fi
 
-echo "Stack criada com sucesso!"
+# Criar arquivo temporário para capturar a saída de erro e a resposta
+erro_output=$(mktemp)
+response_output=$(mktemp)
+
+# Enviar a stack usando o endpoint multipart do Portainer
+echo -e "${VERDE}Enviando a stack para o Portainer...${RESET}"
+http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+  -H "Authorization: Bearer ${JWT_TOKEN}" \
+  -F "Name=${STACK_NAME}" \
+  -F "file=@$(pwd)/${STACK_NAME}.yaml" \
+  -F "SwarmID=${SWARM_ID}" \
+  -F "endpointId=${ENDPOINT_ID}" \
+  "${PORTAINER_URL}/api/stacks/create/swarm/file" 2> "$erro_output")
+
+response_body=$(cat "$response_output")
+
+if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+    # Verifica o conteúdo da resposta para garantir que o deploy foi bem-sucedido
+    if echo "$response_body" | grep -q "\"Id\""; then
+        echo -e "${VERDE}Deploy da stack ${BEGE}${STACK_NAME}${RESET}${VERDE} feito com sucesso!${RESET}"
+    else
+        echo -e "${VERMELHO}Erro, resposta inesperada do servidor ao tentar efetuar deploy da stack ${BEGE}${STACK_NAME}${RESET}.${RESET}"
+        echo "Resposta do servidor: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+    fi
+else
+    echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
+    echo "Mensagem de erro: $(cat "$erro_output")"
+    echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+    
+    # Tentar método alternativo se falhar
+    echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
+    # Tenta com outro endpoint do Portainer (método 2)
+    http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+      -H "Authorization: Bearer ${JWT_TOKEN}" \
+      -H "Content-Type: multipart/form-data" \
+      -F "Name=${STACK_NAME}" \
+      -F "file=@$(pwd)/${STACK_NAME}.yaml" \
+      -F "SwarmID=${SWARM_ID}" \
+      -F "endpointId=${ENDPOINT_ID}" \
+      "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
+    
+    response_body=$(cat "$response_output")
+    
+    if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+        echo -e "${VERDE}Deploy da stack ${BEGE}${STACK_NAME}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
+    else
+        echo -e "${VERMELHO}Erro ao efetuar deploy pelo método alternativo. Resposta HTTP: ${http_code}${RESET}"
+        echo "Mensagem de erro: $(cat "$erro_output")"
+        echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        
+        # Último recurso - usar o Docker diretamente
+        echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
+        if docker stack deploy --prune --resolve-image always -c "${STACK_NAME}.yaml" "${STACK_NAME}"; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${STACK_NAME}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+            echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
+        else
+            error_exit "Falha em todos os métodos de deploy da stack."
+        fi
+    fi
+fi
+
+# Remove os arquivos temporários
+rm -f "$erro_output" "$response_output"
 
 # Salvar credenciais
 CREDENTIALS_DIR="/root/.credentials"
@@ -277,17 +391,19 @@ if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
     
     cat > "${CREDENTIALS_DIR}/evolution.txt" << EOF
 Evolution API Information
-URL: https://api.trafegocomia.com
+URL: https://${EVOLUTION_DOMAIN}
 API Key: ${API_KEY}
 Database: postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/evolution
 EOF
     chmod 600 "${CREDENTIALS_DIR}/evolution.txt"
-    echo "Credenciais da Evolution API salvas em ${CREDENTIALS_DIR}/evolution.txt"
+    echo -e "${VERDE}Credenciais da Evolution API salvas em ${CREDENTIALS_DIR}/evolution.txt${RESET}"
 else
-    echo "Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console."
+    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
 fi
 
 echo "---------------------------------------------"
-echo "API Key: $API_KEY"
-echo "Stack ${STACK_NAME} criada com sucesso via API do Portainer!"
-echo "A stack deve aparecer no Portainer imediatamente."
+echo -e "${VERDE}[ EVOLUTION API ]\n${RESET}"
+echo -e "${VERDE}API URL:${RESET} https://${EVOLUTION_DOMAIN}"
+echo -e "${VERDE}API Key:${RESET} ${API_KEY}"
+echo -e "${VERDE}Stack ${STACK_NAME} criada com sucesso via API do Portainer!${RESET}"
+echo -e "${VERDE}A stack deve aparecer no Portainer e ser editável.${RESET}"
