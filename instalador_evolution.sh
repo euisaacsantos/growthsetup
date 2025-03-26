@@ -2,9 +2,9 @@
 # Script para criar stack Evolution, Redis e PostgreSQL via API do Portainer
 
 # Configurações
-PORTAINER_URL="http://painel.trafegocomia.com"  # Altere para a URL do seu Portainer
+PORTAINER_URL="https://localhost:9000"  # Altere para a URL do seu Portainer
 PORTAINER_USER="admin"                 # Altere para seu usuário do Portainer
-PORTAINER_PASSWORD="fpU6TW3Dg7ulCL+k"          # Altere para sua senha do Portainer
+PORTAINER_PASSWORD="suasenha"          # Altere para sua senha do Portainer
 PORTAINER_ENDPOINT_ID="1"              # ID do endpoint do Docker (normalmente 1 para o local)
 STACK_NAME="evolution-stack"           # Nome da stack
 
@@ -137,7 +137,10 @@ error_exit() {
 
 # Obter token JWT do Portainer
 echo "Autenticando no Portainer..."
-AUTH_RESPONSE=$(curl -s -X POST "${PORTAINER_URL}/api/auth" \
+echo "Tentando acessar: ${PORTAINER_URL}/api/auth"
+
+# Usar curl com a opção -k para ignorar verificação de certificado
+AUTH_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/auth" \
     -H "Content-Type: application/json" \
     -d "{\"username\":\"${PORTAINER_USER}\",\"password\":\"${PORTAINER_PASSWORD}\"}" \
     -w "\n%{http_code}")
@@ -145,8 +148,34 @@ AUTH_RESPONSE=$(curl -s -X POST "${PORTAINER_URL}/api/auth" \
 HTTP_CODE=$(echo "$AUTH_RESPONSE" | tail -n1)
 AUTH_BODY=$(echo "$AUTH_RESPONSE" | sed '$d')
 
+echo "Código HTTP retornado: ${HTTP_CODE}"
+
 if [ "$HTTP_CODE" -ne 200 ]; then
-    error_exit "Autenticação falhou. Código HTTP: ${HTTP_CODE}, Resposta: ${AUTH_BODY}"
+    echo "Erro na autenticação. Resposta completa:"
+    echo "$AUTH_RESPONSE"
+    echo "Verificando se o Portainer está acessível..."
+    curl -k -v "${PORTAINER_URL}" > /dev/null 2>&1
+    
+    echo "Tentando alternativa com HTTP em vez de HTTPS..."
+    PORTAINER_URL_HTTP=$(echo "$PORTAINER_URL" | sed 's/https:/http:/')
+    echo "Tentando acessar: ${PORTAINER_URL_HTTP}/api/auth"
+    
+    AUTH_RESPONSE=$(curl -s -X POST "${PORTAINER_URL_HTTP}/api/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"${PORTAINER_USER}\",\"password\":\"${PORTAINER_PASSWORD}\"}" \
+        -w "\n%{http_code}")
+    
+    HTTP_CODE=$(echo "$AUTH_RESPONSE" | tail -n1)
+    AUTH_BODY=$(echo "$AUTH_RESPONSE" | sed '$d')
+    
+    echo "Código HTTP alternativo: ${HTTP_CODE}"
+    
+    if [ "$HTTP_CODE" -ne 200 ]; then
+        error_exit "Autenticação falhou com ambos HTTPS e HTTP. Verifique a URL e credenciais do Portainer."
+    else
+        echo "Conexão bem-sucedida usando HTTP. Continuando com HTTP..."
+        PORTAINER_URL="$PORTAINER_URL_HTTP"
+    fi
 fi
 
 JWT_TOKEN=$(echo "$AUTH_BODY" | grep -o '"jwt":"[^"]*' | cut -d'"' -f4)
@@ -159,7 +188,7 @@ echo "Autenticação bem-sucedida."
 
 # Obter ID do Swarm
 echo "Obtendo ID do Swarm..."
-SWARM_RESPONSE=$(curl -s -X GET "${PORTAINER_URL}/api/endpoints/${PORTAINER_ENDPOINT_ID}/docker/swarm" \
+SWARM_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/endpoints/${PORTAINER_ENDPOINT_ID}/docker/swarm" \
     -H "Authorization: Bearer ${JWT_TOKEN}" \
     -w "\n%{http_code}")
 
@@ -180,7 +209,7 @@ echo "ID do Swarm: ${SWARM_ID}"
 
 # Criar a stack via API do Portainer
 echo "Criando stack ${STACK_NAME}..."
-STACK_RESPONSE=$(curl -s -X POST "${PORTAINER_URL}/api/stacks?type=1&method=string&endpointId=${PORTAINER_ENDPOINT_ID}" \
+STACK_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/stacks?type=1&method=string&endpointId=${PORTAINER_ENDPOINT_ID}" \
     -H "Authorization: Bearer ${JWT_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "{\"Name\":\"${STACK_NAME}\",\"StackFileContent\":$(echo "$DOCKER_COMPOSE" | jq -R -s .),\"SwarmID\":\"${SWARM_ID}\"}" \
