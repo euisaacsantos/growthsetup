@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script para instalar Redis, PostgreSQL e Evolution API via API do Portainer
+# Script para instalar Redis, PostgreSQL e Evolution API via API do Portainer (Modo inseguro - ignora verificação SSL)
 
 # Cores para melhor visualização
 GREEN='\033[0;32m'
@@ -52,7 +52,8 @@ authenticate() {
 EOF
 )
   
-  local response=$(curl -s -X POST \
+  # Note a adição da flag -k para ignorar a verificação SSL
+  local response=$(curl -k -s -X POST \
     "${PORTAINER_URL}/api/auth" \
     -H "Content-Type: application/json" \
     -d "$auth_data")
@@ -90,8 +91,8 @@ create_stack() {
   local stack_file="$TEMP_DIR/${stack_name}.yml"
   echo "$stack_content" > "$stack_file"
   
-  # Criar o stack usando a API
-  local response=$(curl -s -X POST \
+  # Criar o stack usando a API (note a adição de -k)
+  local response=$(curl -k -s -X POST \
     "${PORTAINER_URL}/api/stacks" \
     -H "Authorization: Bearer ${AUTH_TOKEN}" \
     -F "Name=${stack_name}" \
