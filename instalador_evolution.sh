@@ -171,7 +171,7 @@ services:
       - traefik.http.routers.evolution${SUFFIX}.rule=Host(\`${EVOLUTION_DOMAIN}\`)
       - traefik.http.routers.evolution${SUFFIX}.entrypoints=websecure
       - traefik.http.routers.evolution${SUFFIX}.priority=1
-      - traefik.http.routers.evolution${SUFFIX}.tls.certresolver=letsencryptresolver
+      - traefik.http.routers.evolution${SUFFIX}.tls.certresolver=letsencrypt
       - traefik.http.routers.evolution${SUFFIX}.service=evolution${SUFFIX}
       - traefik.http.services.evolution${SUFFIX}.loadbalancer.server.port=8080
 
