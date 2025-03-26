@@ -3,10 +3,9 @@
 
 # Configurações
 PORTAINER_URL="https://painel.trafegocomia.com"  # URL do seu Portainer
-PORTAINER_USER="admin"                 # Seu usuário do Portainer
-PORTAINER_PASSWORD="fpU6TW3Dg7ulCL+k"          # Sua senha do Portainer (altere aqui)
-PORTAINER_ENDPOINT_ID="1"              # ID do endpoint do Docker (normalmente 1 para o local)
-STACK_NAME="evolution-stack"           # Nome da stack
+PORTAINER_USER="admin"                  # Seu usuário do Portainer
+PORTAINER_PASSWORD="suasenha"           # Sua senha do Portainer (altere aqui)
+STACK_NAME="evolution-stack"            # Nome da stack
 
 # Gerar uma chave API aleatória para a Evolution
 API_KEY=$(openssl rand -hex 16)
@@ -184,8 +183,40 @@ fi
 
 echo "Autenticação bem-sucedida. Token JWT obtido."
 
-# Obter ID do Swarm
-echo "Obtendo ID do Swarm..."
+# Listar endpoints disponíveis
+echo "Listando endpoints disponíveis..."
+ENDPOINTS_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/endpoints" \
+    -H "Authorization: Bearer ${JWT_TOKEN}" \
+    -w "\n%{http_code}")
+
+HTTP_CODE=$(echo "$ENDPOINTS_RESPONSE" | tail -n1)
+ENDPOINTS_BODY=$(echo "$ENDPOINTS_RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" -ne 200 ]; then
+    error_exit "Falha ao listar endpoints. Código HTTP: ${HTTP_CODE}, Resposta: ${ENDPOINTS_BODY}"
+fi
+
+echo "Endpoints disponíveis:"
+echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*,"Name":"[^"]*' | sed 's/"Id":\([0-9]*\),"Name":"\([^"]*\)"/ID: \1, Nome: \2/'
+
+# Solicitar ID do endpoint
+echo ""
+echo "Por favor, informe o ID do endpoint que deseja usar (número ID mostrado acima):"
+read -p "ID do endpoint: " PORTAINER_ENDPOINT_ID
+
+if [ -z "$PORTAINER_ENDPOINT_ID" ]; then
+    # Tentar extrair automaticamente o primeiro endpoint
+    PORTAINER_ENDPOINT_ID=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*' | head -1 | grep -o '[0-9]*')
+    
+    if [ -z "$PORTAINER_ENDPOINT_ID" ]; then
+        error_exit "Nenhum ID de endpoint fornecido e não foi possível extrair automaticamente."
+    else
+        echo "Usando o primeiro endpoint disponível (ID: $PORTAINER_ENDPOINT_ID)"
+    fi
+fi
+
+# Verificar se o endpoint está em Swarm mode
+echo "Verificando se o endpoint está em modo Swarm..."
 SWARM_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/endpoints/${PORTAINER_ENDPOINT_ID}/docker/swarm" \
     -H "Authorization: Bearer ${JWT_TOKEN}" \
     -w "\n%{http_code}")
@@ -194,13 +225,13 @@ HTTP_CODE=$(echo "$SWARM_RESPONSE" | tail -n1)
 SWARM_BODY=$(echo "$SWARM_RESPONSE" | sed '$d')
 
 if [ "$HTTP_CODE" -ne 200 ]; then
-    error_exit "Falha ao obter ID do Swarm. Código HTTP: ${HTTP_CODE}, Resposta: ${SWARM_BODY}"
+    error_exit "Falha ao obter informações do Swarm. Código HTTP: ${HTTP_CODE}, Resposta: ${SWARM_BODY}"
 fi
 
 SWARM_ID=$(echo "$SWARM_BODY" | grep -o '"ID":"[^"]*' | cut -d'"' -f4)
 
 if [ -z "$SWARM_ID" ]; then
-    error_exit "Não foi possível extrair o ID do Swarm da resposta: $SWARM_BODY"
+    error_exit "Não foi possível extrair o ID do Swarm. O endpoint selecionado está em modo Swarm?"
 fi
 
 echo "ID do Swarm: ${SWARM_ID}"
