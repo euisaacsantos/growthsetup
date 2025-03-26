@@ -1,13 +1,5 @@
 #!/bin/bash
-#
-# Script de Instalação Direta - Redis, PostgreSQL e Evolution API
-# Versão: 1.0
-# Data: 26/03/2025
-#
-# Este script instala diretamente usando comandos Docker:
-# - Redis
-# - PostgreSQL
-# - Evolution API
+# Script para instalar Redis, PostgreSQL e Evolution API via API do Portainer
 
 # Cores para melhor visualização
 GREEN='\033[0;32m'
@@ -15,6 +7,14 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Variáveis globais
+PORTAINER_URL=""
+PORTAINER_USER=""
+PORTAINER_PASSWORD=""
+DOMAIN=""
+AUTH_TOKEN=""
+TEMP_DIR="/tmp/portainer-api-install"
 
 # Função para exibir mensagens
 log() {
@@ -29,275 +29,260 @@ usage() {
   echo "Uso: $0 [opções]"
   echo ""
   echo "Opções:"
-  echo "  -d, --domain DOMAIN         Domínio principal (ex: example.com)"
-  echo "  -f, --force                 Forçar reinstalação mesmo se os serviços já existirem"
-  echo "  -h, --help                  Mostrar esta ajuda"
+  echo "  -p, --portainer-url URL      URL do Portainer (ex: https://painel.example.com)"
+  echo "  -u, --portainer-user USER    Usuário do Portainer"
+  echo "  -w, --portainer-password PWD Senha do Portainer"
+  echo "  -d, --domain DOMAIN          Domínio principal (ex: example.com)"
+  echo "  -h, --help                   Mostra esta ajuda"
   echo ""
   echo "Exemplo:"
-  echo "  $0 --domain trafegocomia.com"
+  echo "  $0 -p https://painel.example.com -u admin -w senha123 -d example.com"
   exit 1
 }
 
-# Função para verificar se está sendo executado como root
-check_root() {
-  if [ "$(id -u)" != "0" ]; then
-    log "Este script precisa ser executado como root!" "$RED"
+# Função para autenticar no Portainer
+authenticate() {
+  log "Autenticando no Portainer..." "$BLUE"
+  
+  local auth_data=$(cat <<EOF
+{
+  "Username": "$PORTAINER_USER",
+  "Password": "$PORTAINER_PASSWORD"
+}
+EOF
+)
+  
+  local response=$(curl -s -X POST \
+    "${PORTAINER_URL}/api/auth" \
+    -H "Content-Type: application/json" \
+    -d "$auth_data")
+  
+  # Salvar resposta para debug
+  mkdir -p "$TEMP_DIR"
+  echo "$response" > "$TEMP_DIR/auth_response.json"
+  
+  # Verificar se houve erro
+  if echo "$response" | grep -q "error" || ! echo "$response" | grep -q "jwt"; then
+    local error_msg=$(echo "$response" | jq -r '.message // "Erro desconhecido"')
+    log "Falha na autenticação: $error_msg" "$RED"
     exit 1
   fi
+  
+  # Extrair token JWT
+  AUTH_TOKEN=$(echo "$response" | jq -r '.jwt')
+  
+  if [ -z "$AUTH_TOKEN" ] || [ "$AUTH_TOKEN" == "null" ]; then
+    log "Falha ao obter token JWT" "$RED"
+    exit 1
+  fi
+  
+  log "Autenticação bem-sucedida!" "$GREEN"
 }
 
-# Função para instalar dependências
-install_dependencies() {
-  log "Verificando dependências..." "$BLUE"
+# Função para criar um stack usando a API
+create_stack() {
+  local stack_name="$1"
+  local stack_content="$2"
   
-  # Verificar se o Docker está instalado
-  if ! command -v docker &> /dev/null; then
-    log "Docker não encontrado. Instalando..." "$YELLOW"
-    
-    # Atualizar listas de pacotes
-    apt update
-    
-    # Instalar pacotes necessários
-    apt install -y apt-transport-https ca-certificates curl software-properties-common
-    
-    # Adicionar chave GPG oficial do Docker
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-    
-    # Adicionar repositório do Docker
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
-    # Atualizar listas de pacotes e instalar Docker
-    apt update
-    apt install -y docker-ce docker-ce-cli containerd.io
-    
-    log "Docker instalado com sucesso!" "$GREEN"
-  else
-    log "Docker já está instalado." "$GREEN"
+  log "Criando stack '$stack_name'..." "$BLUE"
+  
+  # Salvar conteúdo do stack em um arquivo
+  local stack_file="$TEMP_DIR/${stack_name}.yml"
+  echo "$stack_content" > "$stack_file"
+  
+  # Criar o stack usando a API
+  local response=$(curl -s -X POST \
+    "${PORTAINER_URL}/api/stacks" \
+    -H "Authorization: Bearer ${AUTH_TOKEN}" \
+    -F "Name=${stack_name}" \
+    -F "SwarmID=default" \
+    -F "file=@${stack_file}")
+  
+  # Salvar resposta para debug
+  echo "$response" > "$TEMP_DIR/${stack_name}_response.json"
+  
+  # Verificar se houve erro
+  if echo "$response" | grep -q "error" || echo "$response" | grep -q "message"; then
+    local error_msg=$(echo "$response" | jq -r '.message // "Erro desconhecido"')
+    log "Erro ao criar stack '$stack_name': $error_msg" "$RED"
+    return 1
   fi
   
-  # Verificar se o Docker está em execução
-  if ! systemctl is-active --quiet docker; then
-    log "Iniciando serviço Docker..." "$YELLOW"
-    systemctl start docker
-  fi
-  
-  # Habilitar Docker na inicialização
-  systemctl enable docker
+  log "Stack '$stack_name' criado com sucesso!" "$GREEN"
+  return 0
 }
 
-# Função para verificar se o Docker Swarm está inicializado
-check_swarm() {
-  log "Verificando Docker Swarm..." "$BLUE"
+# Função para gerar conteúdo dos stacks
+generate_stack_contents() {
+  # Remover prefixos http:// ou https:// do domínio
+  local clean_domain=$(echo "$DOMAIN" | sed 's|^https://||' | sed 's|^http://||')
   
-  if ! docker info | grep -q "Swarm: active"; then
-    log "Docker Swarm não está ativo. Inicializando..." "$YELLOW"
-    
-    # Obter o IP primário
-    local SERVER_IP=$(hostname -I | awk '{print $1}')
-    
-    # Inicializar o swarm
-    docker swarm init --advertise-addr "$SERVER_IP"
-    
-    log "Docker Swarm inicializado com sucesso!" "$GREEN"
-  else
-    log "Docker Swarm já está ativo." "$GREEN"
-  fi
-}
+  # Redis stack
+  cat > "$TEMP_DIR/redis.yml" << EOF
+version: "3.7"
+services:
+  redis:
+    image: redis:latest
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - GrowthNet
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
 
-# Função para criar rede
-create_network() {
-  log "Verificando rede GrowthNet..." "$BLUE"
-  
-  if ! docker network ls | grep -q "GrowthNet"; then
-    log "Criando rede GrowthNet..." "$YELLOW"
-    docker network create --driver overlay GrowthNet
-    log "Rede GrowthNet criada com sucesso!" "$GREEN"
-  else
-    log "Rede GrowthNet já existe." "$GREEN"
-  fi
+volumes:
+  redis_data:
+    name: redis_data
+
+networks:
+  GrowthNet:
+    external: true
+    name: GrowthNet
+EOF
+
+  # PostgreSQL stack
+  cat > "$TEMP_DIR/postgres.yml" << EOF
+version: "3.7"
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_PASSWORD=b2ecbaa44551df03fa3793b38091cff7
+      - POSTGRES_USER=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - GrowthNet
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
+
+volumes:
+  postgres_data:
+    name: postgres_data
+
+networks:
+  GrowthNet:
+    external: true
+    name: GrowthNet
+EOF
+
+  # Evolution API stack
+  cat > "$TEMP_DIR/evolution.yml" << EOF
+version: "3.7"
+services:
+  evolution:
+    image: atendai/evolution-api:latest
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - GrowthNet
+    environment:
+      # Configurações Gerais
+      - SERVER_URL=https://api.${clean_domain}
+      - AUTHENTICATION_API_KEY=2dc7b3194ce0704b12f68305f1904ca4
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
+      - DEL_INSTANCE=false
+      - QRCODE_LIMIT=1902
+      - LANGUAGE=pt-BR
+      
+      # Configuração do Cliente
+      - CONFIG_SESSION_PHONE_VERSION=2.3000.1019780779
+      - CONFIG_SESSION_PHONE_CLIENT=GrowthTap
+      - CONFIG_SESSION_PHONE_NAME=Chrome
+      
+      # Configuração do Banco de Dados
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/evolution
+      - DATABASE_CONNECTION_CLIENT_NAME=evolution
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - DATABASE_SAVE_MESSAGE_UPDATE=true
+      - DATABASE_SAVE_DATA_CONTACTS=true
+      - DATABASE_SAVE_DATA_CHATS=true
+      - DATABASE_SAVE_DATA_LABELS=true
+      - DATABASE_SAVE_DATA_HISTORIC=true
+      
+      # Integrações
+      - OPENAI_ENABLED=true
+      - DIFY_ENABLED=true
+      - TYPEBOT_ENABLED=true
+      - TYPEBOT_API_VERSION=latest
+      - CHATWOOT_ENABLED=true
+      - CHATWOOT_MESSAGE_READ=true
+      - CHATWOOT_MESSAGE_DELETE=true
+      - CHATWOOT_IMPORT_DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/chatwoot?sslmode=disable
+      - CHATWOOT_IMPORT_PLACEHOLDER_MEDIA_MESSAGE=false
+      
+      # Configuração do Cache
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/8
+      - CACHE_REDIS_PREFIX_KEY=evolution
+      - CACHE_REDIS_SAVE_INSTANCES=false
+      - CACHE_LOCAL_ENABLED=false
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
+      labels:
+      - traefik.enable=true
+      - traefik.http.routers.evolution.rule=Host(\`api.${clean_domain}\`)
+      - traefik.http.routers.evolution.entrypoints=websecure
+      - traefik.http.routers.evolution.priority=1
+      - traefik.http.routers.evolution.tls.certresolver=letsencryptresolver
+      - traefik.http.routers.evolution.service=evolution
+      - traefik.http.services.evolution.loadbalancer.server.port=8080
+      - traefik.http.services.evolution.loadbalancer.passHostHeader=true
+
+volumes:
+  evolution_instances:
+    external: true
+    name: evolution_instances
+
+networks:
+  GrowthNet:
+    external: true
+    name: GrowthNet
+EOF
 }
 
 # Função para criar volumes
-create_volumes() {
-  log "Verificando volumes necessários..." "$BLUE"
+create_volumes_manually() {
+  log "Verificando e criando volumes necessários..." "$BLUE"
   
-  # Verificar e criar volume para o Redis
-  if ! docker volume ls | grep -q "redis_data"; then
-    log "Criando volume redis_data..." "$YELLOW"
-    docker volume create redis_data
-    log "Volume redis_data criado com sucesso!" "$GREEN"
-  else
-    log "Volume redis_data já existe." "$GREEN"
-  fi
-  
-  # Verificar e criar volume para o PostgreSQL
-  if ! docker volume ls | grep -q "postgres_data"; then
-    log "Criando volume postgres_data..." "$YELLOW"
-    docker volume create postgres_data
-    log "Volume postgres_data criado com sucesso!" "$GREEN"
-  else
-    log "Volume postgres_data já existe." "$GREEN"
-  fi
-  
-  # Verificar e criar volume para a Evolution API
-  if ! docker volume ls | grep -q "evolution_instances"; then
-    log "Criando volume evolution_instances..." "$YELLOW"
-    docker volume create evolution_instances
-    log "Volume evolution_instances criado com sucesso!" "$GREEN"
-  else
-    log "Volume evolution_instances já existe." "$GREEN"
-  fi
+  docker volume create redis_data || log "Volume redis_data já existe" "$YELLOW"
+  docker volume create postgres_data || log "Volume postgres_data já existe" "$YELLOW"
+  docker volume create evolution_instances || log "Volume evolution_instances já existe" "$YELLOW"
 }
 
-# Função para instalar o Redis
-install_redis() {
-  local force=$1
+# Função para criar rede
+create_network_manually() {
+  log "Verificando e criando rede GrowthNet..." "$BLUE"
   
-  log "Verificando serviço Redis..." "$BLUE"
-  
-  # Verificar se o serviço já existe
-  if docker service ls | grep -q "redis"; then
-    if [ "$force" = true ]; then
-      log "Serviço Redis já existe. Removendo para reinstalação..." "$YELLOW"
-      docker service rm redis
-      sleep 5 # Aguardar remoção completa
-    else
-      log "Serviço Redis já existe. Pulando instalação." "$YELLOW"
-      return 0
-    fi
+  if ! docker network ls | grep -q "GrowthNet"; then
+    docker network create --driver overlay GrowthNet
+    log "Rede GrowthNet criada com sucesso!" "$GREEN"
+  else
+    log "Rede GrowthNet já existe." "$YELLOW"
   fi
-  
-  log "Instalando Redis..." "$BLUE"
-  
-  # Criar serviço Redis
-  docker service create \
-    --name redis \
-    --network GrowthNet \
-    --mount type=volume,source=redis_data,target=/data \
-    --constraint 'node.role == manager' \
-    redis:latest redis-server --appendonly yes
-  
-  log "Redis instalado com sucesso!" "$GREEN"
-}
-
-# Função para instalar o PostgreSQL
-install_postgres() {
-  local force=$1
-  
-  log "Verificando serviço PostgreSQL..." "$BLUE"
-  
-  # Verificar se o serviço já existe
-  if docker service ls | grep -q "postgres"; then
-    if [ "$force" = true ]; then
-      log "Serviço PostgreSQL já existe. Removendo para reinstalação..." "$YELLOW"
-      docker service rm postgres
-      sleep 5 # Aguardar remoção completa
-    else
-      log "Serviço PostgreSQL já existe. Pulando instalação." "$YELLOW"
-      return 0
-    fi
-  fi
-  
-  log "Instalando PostgreSQL..." "$BLUE"
-  
-  # Criar serviço PostgreSQL
-  docker service create \
-    --name postgres \
-    --network GrowthNet \
-    --mount type=volume,source=postgres_data,target=/var/lib/postgresql/data \
-    --env POSTGRES_PASSWORD=b2ecbaa44551df03fa3793b38091cff7 \
-    --env POSTGRES_USER=postgres \
-    --constraint 'node.role == manager' \
-    postgres:13
-  
-  log "PostgreSQL instalado com sucesso!" "$GREEN"
-}
-
-# Função para instalar a Evolution API
-install_evolution() {
-  local domain=$1
-  local force=$2
-  
-  log "Verificando serviço Evolution API..." "$BLUE"
-  
-  # Verificar se o serviço já existe
-  if docker service ls | grep -q "evolution"; then
-    if [ "$force" = true ]; then
-      log "Serviço Evolution API já existe. Removendo para reinstalação..." "$YELLOW"
-      docker service rm evolution
-      sleep 5 # Aguardar remoção completa
-    else
-      log "Serviço Evolution API já existe. Pulando instalação." "$YELLOW"
-      return 0
-    fi
-  fi
-  
-  log "Instalando Evolution API..." "$BLUE"
-  
-  # Remover qualquer prefixo http:// ou https:// do domínio
-  local clean_domain=$(echo "$domain" | sed 's|^https://||' | sed 's|^http://||')
-  
-  # Criar serviço Evolution API
-  docker service create \
-    --name evolution \
-    --network GrowthNet \
-    --mount type=volume,source=evolution_instances,target=/evolution/instances \
-    --env SERVER_URL=https://api.${clean_domain} \
-    --env AUTHENTICATION_API_KEY=2dc7b3194ce0704b12f68305f1904ca4 \
-    --env AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true \
-    --env DEL_INSTANCE=false \
-    --env QRCODE_LIMIT=1902 \
-    --env LANGUAGE=pt-BR \
-    --env CONFIG_SESSION_PHONE_VERSION=2.3000.1019780779 \
-    --env CONFIG_SESSION_PHONE_CLIENT=GrowthTap \
-    --env CONFIG_SESSION_PHONE_NAME=Chrome \
-    --env DATABASE_ENABLED=true \
-    --env DATABASE_PROVIDER=postgresql \
-    --env DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/evolution \
-    --env DATABASE_CONNECTION_CLIENT_NAME=evolution \
-    --env DATABASE_SAVE_DATA_INSTANCE=true \
-    --env DATABASE_SAVE_DATA_NEW_MESSAGE=true \
-    --env DATABASE_SAVE_MESSAGE_UPDATE=true \
-    --env DATABASE_SAVE_DATA_CONTACTS=true \
-    --env DATABASE_SAVE_DATA_CHATS=true \
-    --env DATABASE_SAVE_DATA_LABELS=true \
-    --env DATABASE_SAVE_DATA_HISTORIC=true \
-    --env OPENAI_ENABLED=true \
-    --env DIFY_ENABLED=true \
-    --env TYPEBOT_ENABLED=true \
-    --env TYPEBOT_API_VERSION=latest \
-    --env CHATWOOT_ENABLED=true \
-    --env CHATWOOT_MESSAGE_READ=true \
-    --env CHATWOOT_MESSAGE_DELETE=true \
-    --env CHATWOOT_IMPORT_DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/chatwoot?sslmode=disable \
-    --env CHATWOOT_IMPORT_PLACEHOLDER_MEDIA_MESSAGE=false \
-    --env CACHE_REDIS_ENABLED=true \
-    --env CACHE_REDIS_URI=redis://redis:6379/8 \
-    --env CACHE_REDIS_PREFIX_KEY=evolution \
-    --env CACHE_REDIS_SAVE_INSTANCES=false \
-    --env CACHE_LOCAL_ENABLED=false \
-    --constraint 'node.role == manager' \
-    --label "traefik.enable=true" \
-    --label "traefik.http.routers.evolution.rule=Host(\`api.${clean_domain}\`)" \
-    --label "traefik.http.routers.evolution.entrypoints=websecure" \
-    --label "traefik.http.routers.evolution.priority=1" \
-    --label "traefik.http.routers.evolution.tls.certresolver=letsencryptresolver" \
-    --label "traefik.http.routers.evolution.service=evolution" \
-    --label "traefik.http.services.evolution.loadbalancer.server.port=8080" \
-    --label "traefik.http.services.evolution.loadbalancer.passHostHeader=true" \
-    atendai/evolution-api:latest
-  
-  log "Evolution API instalada com sucesso!" "$GREEN"
 }
 
 # Função para salvar credenciais
 save_credentials() {
-  local domain=$1
+  local clean_domain=$(echo "$DOMAIN" | sed 's|^https://||' | sed 's|^http://||')
   
   log "Salvando credenciais..." "$BLUE"
-  
-  # Remover prefixos http:// ou https:// do domínio
-  local clean_domain=$(echo "$domain" | sed 's|^https://||' | sed 's|^http://||')
   
   # Criar diretório para credenciais
   mkdir -p /root/.credentials
@@ -335,56 +320,44 @@ Database: postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/e
 EOF
   chmod 600 /root/.credentials/evolution.txt
   
+  # Credenciais do Portainer
+  cat > /root/.credentials/portainer.txt << EOF
+Portainer Admin Credentials
+URL: ${PORTAINER_URL}
+Username: ${PORTAINER_USER}
+Password: ${PORTAINER_PASSWORD}
+EOF
+  chmod 600 /root/.credentials/portainer.txt
+  
   log "Credenciais salvas em /root/.credentials/" "$GREEN"
-}
-
-# Função para verificar status dos serviços
-check_services() {
-  log "Verificando status dos serviços..." "$BLUE"
-  
-  # Esperar um pouco para os serviços iniciarem
-  sleep 5
-  
-  # Listar serviços
-  docker service ls
-  
-  # Verificar Redis
-  if docker service ls | grep -q "redis"; then
-    log "Serviço Redis: ATIVO" "$GREEN"
-  else
-    log "Serviço Redis: NÃO ENCONTRADO" "$RED"
-  fi
-  
-  # Verificar PostgreSQL
-  if docker service ls | grep -q "postgres"; then
-    log "Serviço PostgreSQL: ATIVO" "$GREEN"
-  else
-    log "Serviço PostgreSQL: NÃO ENCONTRADO" "$RED"
-  fi
-  
-  # Verificar Evolution API
-  if docker service ls | grep -q "evolution"; then
-    log "Serviço Evolution API: ATIVO" "$GREEN"
-  else
-    log "Serviço Evolution API: NÃO ENCONTRADO" "$RED"
-  fi
 }
 
 # Função principal
 main() {
-  local domain=""
-  local force=false
+  # Verificar se jq está instalado
+  if ! command -v jq &> /dev/null; then
+    log "Instalando jq..." "$YELLOW"
+    apt update && apt install -y jq
+  fi
   
   # Processar argumentos
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -d|--domain)
-        domain="$2"
+      -p|--portainer-url)
+        PORTAINER_URL="$2"
         shift 2
         ;;
-      -f|--force)
-        force=true
-        shift
+      -u|--portainer-user)
+        PORTAINER_USER="$2"
+        shift 2
+        ;;
+      -w|--portainer-password)
+        PORTAINER_PASSWORD="$2"
+        shift 2
+        ;;
+      -d|--domain)
+        DOMAIN="$2"
+        shift 2
         ;;
       -h|--help)
         usage
@@ -397,39 +370,36 @@ main() {
   done
   
   # Verificar argumentos obrigatórios
-  if [ -z "$domain" ]; then
-    log "Argumento obrigatório faltando: domain" "$RED"
+  if [ -z "$PORTAINER_URL" ] || [ -z "$PORTAINER_USER" ] || [ -z "$PORTAINER_PASSWORD" ] || [ -z "$DOMAIN" ]; then
+    log "Todos os argumentos são obrigatórios!" "$RED"
     usage
   fi
   
-  # Verificar se está sendo executado como root
-  check_root
+  # Criar diretório temporário
+  mkdir -p "$TEMP_DIR"
   
-  # Instalar dependências
-  install_dependencies
+  # Autenticar no Portainer
+  authenticate
   
-  # Verificar e inicializar Docker Swarm
-  check_swarm
+  # Criar volumes manualmente (não através da API)
+  create_volumes_manually
   
-  # Criar rede
-  create_network
+  # Criar rede manualmente (não através da API)
+  create_network_manually
   
-  # Criar volumes
-  create_volumes
+  # Gerar conteúdo dos stacks
+  generate_stack_contents
   
-  # Instalar serviços
-  install_redis "$force"
-  install_postgres "$force"
-  install_evolution "$domain" "$force"
+  # Criar stacks
+  create_stack "redis" "$(cat $TEMP_DIR/redis.yml)"
+  create_stack "postgres" "$(cat $TEMP_DIR/postgres.yml)"
+  create_stack "evolution" "$(cat $TEMP_DIR/evolution.yml)"
   
   # Salvar credenciais
-  save_credentials "$domain"
-  
-  # Verificar status dos serviços
-  check_services
+  save_credentials
   
   log "Instalação concluída com sucesso!" "$GREEN"
-  log "Acesse a Evolution API em: https://api.$(echo "$domain" | sed 's|^https://||' | sed 's|^http://||')" "$GREEN"
+  log "Acesse a Evolution API em: https://api.$(echo "$DOMAIN" | sed 's|^https://||' | sed 's|^http://||')" "$GREEN"
   log "Credenciais salvas em: /root/.credentials/" "$GREEN"
 }
 
