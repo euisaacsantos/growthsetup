@@ -1,12 +1,32 @@
 #!/bin/bash
-# Script para criar stack editável no Portainer (Evolution API + Redis + PostgreSQL)
+# Script para criar stack editável no Portainer - Versão para n8n
+# Uso: ./script.sh <portainer_url> <evolution_domain> [sufixo]
+# Exemplo: ./script.sh painel.trafegocomia.com api.trafegocomia.com cliente1
 
-# Configurações
-PORTAINER_URL="https://painel.trafegocomia.com" # URL do Portainer (sem https://)
-PORTAINER_USER="admin"                          # Usuário do Portainer
-PORTAINER_PASSWORD="y7fNMVEpeJVEsVAw"                   # Senha do Portainer
-STACK_NAME="evolution-stack"                    # Nome da stack
-EVOLUTION_DOMAIN="api.trafegocomia.com"         # Domínio para a Evolution API
+# Verificar parâmetros obrigatórios
+if [ $# -lt 2 ]; then
+    echo "Uso: $0 <portainer_url> <evolution_domain> [sufixo]"
+    echo "Exemplo: $0 painel.trafegocomia.com api.trafegocomia.com cliente1"
+    exit 1
+fi
+
+# Capturar parâmetros da linha de comando
+PORTAINER_URL="https://$1"  # URL do Portainer
+EVOLUTION_DOMAIN="$2"       # Domínio para a Evolution API
+
+# Verificar se há sufixo (para múltiplas instâncias)
+if [ -n "$3" ]; then
+    SUFFIX="_$3"
+    echo "Instalando Evolution com sufixo: $SUFFIX"
+else
+    SUFFIX=""
+    echo "Instalando primeira instância da Evolution (sem sufixo)"
+fi
+
+# Configurações adicionais
+PORTAINER_USER="admin"          # Usuário do Portainer (possibilidade de expansão para receber via parâmetro)
+PORTAINER_PASSWORD="suasenha"   # Senha do Portainer (possibilidade de expansão para receber via parâmetro)
+STACK_NAME="evolution${SUFFIX}" # Nome da stack com sufixo opcional
 
 # Cores para formatação
 AMARELO="\e[33m"
@@ -27,9 +47,9 @@ error_exit() {
 
 # Criar volumes Docker necessários
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
-docker volume create redis_data 2>/dev/null || echo "Volume redis_data já existe."
-docker volume create postgres_data 2>/dev/null || echo "Volume postgres_data já existe."
-docker volume create evolution_instances 2>/dev/null || echo "Volume evolution_instances já existe."
+docker volume create redis_data${SUFFIX} 2>/dev/null || echo "Volume redis_data${SUFFIX} já existe."
+docker volume create postgres_data${SUFFIX} 2>/dev/null || echo "Volume postgres_data${SUFFIX} já existe."
+docker volume create evolution_instances${SUFFIX} 2>/dev/null || echo "Volume evolution_instances${SUFFIX} já existe."
 
 # Criar rede overlay se não existir
 docker network create --driver overlay GrowthNet 2>/dev/null || echo "Rede GrowthNet já existe."
@@ -39,11 +59,11 @@ echo -e "${VERDE}Criando arquivo docker-compose para a stack...${RESET}"
 cat > "${STACK_NAME}.yaml" <<EOL
 version: '3.7'
 services:
-  redis:
+  redis${SUFFIX}:
     image: redis:latest
     command: redis-server --appendonly yes
     volumes:
-      - redis_data:/data
+      - redis_data${SUFFIX}:/data
     networks:
       - GrowthNet
     deploy:
@@ -53,13 +73,13 @@ services:
         constraints:
         - node.role == manager
 
-  postgres:
+  postgres${SUFFIX}:
     image: postgres:13
     environment:
       - POSTGRES_PASSWORD=b2ecbaa44551df03fa3793b38091cff7
       - POSTGRES_USER=postgres
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data${SUFFIX}:/var/lib/postgresql/data
     networks:
       - GrowthNet
     deploy:
@@ -69,10 +89,10 @@ services:
         constraints:
         - node.role == manager
 
-  evolution:
+  evolution${SUFFIX}:
     image: atendai/evolution-api:latest
     volumes:
-      - evolution_instances:/evolution/instances
+      - evolution_instances${SUFFIX}:/evolution/instances
     networks:
       - GrowthNet
     environment:
@@ -87,8 +107,8 @@ services:
       - CONFIG_SESSION_PHONE_NAME=Chrome
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
-      - DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/evolution
-      - DATABASE_CONNECTION_CLIENT_NAME=evolution
+      - DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres${SUFFIX}:5432/evolution${SUFFIX}
+      - DATABASE_CONNECTION_CLIENT_NAME=evolution${SUFFIX}
       - DATABASE_SAVE_DATA_INSTANCE=true
       - DATABASE_SAVE_DATA_NEW_MESSAGE=true
       - DATABASE_SAVE_MESSAGE_UPDATE=true
@@ -103,10 +123,10 @@ services:
       - CHATWOOT_ENABLED=true
       - CHATWOOT_MESSAGE_READ=true
       - CHATWOOT_MESSAGE_DELETE=true
-      - CHATWOOT_IMPORT_DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/chatwoot?sslmode=disable
+      - CHATWOOT_IMPORT_DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres${SUFFIX}:5432/chatwoot?sslmode=disable
       - CHATWOOT_IMPORT_PLACEHOLDER_MEDIA_MESSAGE=false
       - CACHE_REDIS_ENABLED=true
-      - CACHE_REDIS_URI=redis://redis:6379/8
+      - CACHE_REDIS_URI=redis://redis${SUFFIX}:6379/8
       - CACHE_REDIS_PREFIX_KEY=evolution
       - CACHE_REDIS_SAVE_INSTANCES=false
       - CACHE_LOCAL_ENABLED=false
@@ -118,19 +138,19 @@ services:
         - node.role == manager
       labels:
       - traefik.enable=true
-      - traefik.http.routers.evolution.rule=Host(\`${EVOLUTION_DOMAIN}\`)
-      - traefik.http.routers.evolution.entrypoints=websecure
-      - traefik.http.routers.evolution.priority=1
-      - traefik.http.routers.evolution.tls.certresolver=letsencryptresolver
-      - traefik.http.routers.evolution.service=evolution
-      - traefik.http.services.evolution.loadbalancer.server.port=8080
+      - traefik.http.routers.evolution${SUFFIX}.rule=Host(\`${EVOLUTION_DOMAIN}\`)
+      - traefik.http.routers.evolution${SUFFIX}.entrypoints=websecure
+      - traefik.http.routers.evolution${SUFFIX}.priority=1
+      - traefik.http.routers.evolution${SUFFIX}.tls.certresolver=letsencryptresolver
+      - traefik.http.routers.evolution${SUFFIX}.service=evolution${SUFFIX}
+      - traefik.http.services.evolution${SUFFIX}.loadbalancer.server.port=8080
 
 volumes:
-  redis_data:
+  redis_data${SUFFIX}:
     external: true
-  postgres_data:
+  postgres_data${SUFFIX}:
     external: true
-  evolution_instances:
+  evolution_instances${SUFFIX}:
     external: true
 
 networks:
@@ -212,20 +232,13 @@ echo -e "${VERDE}Endpoints disponíveis:${RESET}"
 ENDPOINTS_LIST=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*,"Name":"[^"]*' | sed 's/"Id":\([0-9]*\),"Name":"\([^"]*\)"/ID: \1, Nome: \2/')
 echo "$ENDPOINTS_LIST"
 
-# Solicitar ID do endpoint
-echo ""
-echo -e "${VERDE}Por favor, informe o ID do endpoint que deseja usar (número ID mostrado acima):${RESET}"
-read -p "ID do endpoint: " ENDPOINT_ID
-
-if [ -z "$ENDPOINT_ID" ]; then
-    # Tentar extrair automaticamente o primeiro endpoint
-    ENDPOINT_ID=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*' | head -1 | grep -o '[0-9]*')
+# Selecionar automaticamente o primeiro endpoint disponível
+ENDPOINT_ID=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*' | head -1 | grep -o '[0-9]*')
     
-    if [ -z "$ENDPOINT_ID" ]; then
-        error_exit "Nenhum ID de endpoint fornecido e não foi possível extrair automaticamente."
-    else
-        echo -e "Usando o primeiro endpoint disponível (ID: ${BEGE}${ENDPOINT_ID}${RESET})"
-    fi
+if [ -z "$ENDPOINT_ID" ]; then
+    error_exit "Não foi possível determinar o ID do endpoint."
+else
+    echo -e "Usando o primeiro endpoint disponível (ID: ${BEGE}${ENDPOINT_ID}${RESET})"
 fi
 
 # Verificar se o endpoint está em Swarm mode
@@ -267,56 +280,25 @@ else
     
     if [ ! -z "$EXISTING_STACK_ID" ]; then
         echo -e "${AMARELO}Uma stack com o nome '${STACK_NAME}' já existe (ID: ${EXISTING_STACK_ID})${RESET}"
-        echo "Opções:"
-        echo "1. Atualizar a stack existente"
-        echo "2. Criar uma nova stack com um nome diferente"
-        echo "3. Sair"
-        read -p "Escolha uma opção (1-3): " STACK_OPTION
+        echo -e "${VERDE}Removendo a stack existente para recriá-la...${RESET}"
         
-        case $STACK_OPTION in
-            1)
-                echo -e "${VERDE}Atualizando stack existente...${RESET}"
-                
-                # Remover a stack existente
-                echo -e "${VERDE}Removendo a stack existente para recriá-la...${RESET}"
-                DELETE_RESPONSE=$(curl -k -s -X DELETE "${PORTAINER_URL}/api/stacks/${EXISTING_STACK_ID}?endpointId=${ENDPOINT_ID}" \
-                    -H "Authorization: Bearer ${JWT_TOKEN}" \
-                    -w "\n%{http_code}")
-                
-                HTTP_CODE=$(echo "$DELETE_RESPONSE" | tail -n1)
-                DELETE_BODY=$(echo "$DELETE_RESPONSE" | sed '$d')
-                
-                if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 204 ]; then
-                    echo -e "${AMARELO}Aviso: Não foi possível remover a stack existente. Código HTTP: ${HTTP_CODE}${RESET}"
-                    echo "Continuando mesmo assim..."
-                else
-                    echo -e "${VERDE}Stack existente removida com sucesso.${RESET}"
-                fi
-                
-                # Aguardar um momento para garantir que a stack foi removida
-                sleep 3
-                ;;
-            2)
-                echo -e "${VERDE}Criando stack com um novo nome...${RESET}"
-                read -p "Informe o novo nome para a stack: " NEW_STACK_NAME
-                if [ -z "$NEW_STACK_NAME" ]; then
-                    NEW_STACK_NAME="${STACK_NAME}-$(date +%Y%m%d%H%M%S)"
-                    echo -e "Usando nome gerado automaticamente: ${BEGE}${NEW_STACK_NAME}${RESET}"
-                fi
-                STACK_NAME="$NEW_STACK_NAME"
-                
-                # Atualizar o nome no arquivo yaml
-                mv "${STACK_NAME}.yaml" "${NEW_STACK_NAME}.yaml"
-                STACK_NAME="${NEW_STACK_NAME}"
-                ;;
-            3)
-                echo -e "${VERDE}Operação cancelada pelo usuário.${RESET}"
-                exit 0
-                ;;
-            *)
-                error_exit "Opção inválida."
-                ;;
-        esac
+        # Remover a stack existente
+        DELETE_RESPONSE=$(curl -k -s -X DELETE "${PORTAINER_URL}/api/stacks/${EXISTING_STACK_ID}?endpointId=${ENDPOINT_ID}" \
+            -H "Authorization: Bearer ${JWT_TOKEN}" \
+            -w "\n%{http_code}")
+        
+        HTTP_CODE=$(echo "$DELETE_RESPONSE" | tail -n1)
+        DELETE_BODY=$(echo "$DELETE_RESPONSE" | sed '$d')
+        
+        if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 204 ]; then
+            echo -e "${AMARELO}Aviso: Não foi possível remover a stack existente. Código HTTP: ${HTTP_CODE}${RESET}"
+            echo "Continuando mesmo assim..."
+        else
+            echo -e "${VERDE}Stack existente removida com sucesso.${RESET}"
+        fi
+        
+        # Aguardar um momento para garantir que a stack foi removida
+        sleep 3
     fi
 fi
 
@@ -389,21 +371,35 @@ CREDENTIALS_DIR="/root/.credentials"
 if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
     chmod 700 "$CREDENTIALS_DIR"
     
-    cat > "${CREDENTIALS_DIR}/evolution.txt" << EOF
+    cat > "${CREDENTIALS_DIR}/evolution${SUFFIX}.txt" << EOF
 Evolution API Information
 URL: https://${EVOLUTION_DOMAIN}
 API Key: ${API_KEY}
-Database: postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/evolution
+Database: postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres${SUFFIX}:5432/evolution${SUFFIX}
 EOF
-    chmod 600 "${CREDENTIALS_DIR}/evolution.txt"
-    echo -e "${VERDE}Credenciais da Evolution API salvas em ${CREDENTIALS_DIR}/evolution.txt${RESET}"
+    chmod 600 "${CREDENTIALS_DIR}/evolution${SUFFIX}.txt"
+    echo -e "${VERDE}Credenciais da Evolution API salvas em ${CREDENTIALS_DIR}/evolution${SUFFIX}.txt${RESET}"
 else
     echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
 fi
 
 echo "---------------------------------------------"
-echo -e "${VERDE}[ EVOLUTION API ]\n${RESET}"
-echo -e "${VERDE}API URL:${RESET} https://${EVOLUTION_DOMAIN}"
+echo -e "${VERDE}[ EVOLUTION API - INSTALAÇÃO COMPLETA ]${RESET}"
+echo -e "${VERDE}URL da API:${RESET} https://${EVOLUTION_DOMAIN}"
 echo -e "${VERDE}API Key:${RESET} ${API_KEY}"
+echo -e "${VERDE}Link do Manager:${RESET} https://${EVOLUTION_DOMAIN}/manager"
 echo -e "${VERDE}Stack ${STACK_NAME} criada com sucesso via API do Portainer!${RESET}"
-echo -e "${VERDE}A stack deve aparecer no Portainer e ser editável.${RESET}"
+echo -e "${VERDE}A stack está disponível e editável no Portainer.${RESET}"
+
+# Criar um objeto JSON de saída para o n8n
+cat << EOF > /tmp/evolution_output.json
+{
+  "url": "https://${EVOLUTION_DOMAIN}",
+  "apiKey": "${API_KEY}",
+  "managerUrl": "https://${EVOLUTION_DOMAIN}/manager",
+  "stackName": "${STACK_NAME}",
+  "databaseUri": "postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres${SUFFIX}:5432/evolution${SUFFIX}"
+}
+EOF
+
+echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/evolution_output.json${RESET}"
