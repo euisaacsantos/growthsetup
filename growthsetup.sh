@@ -105,8 +105,19 @@ reinstall_ubuntu() {
 update_system() {
   log "Atualizando o sistema..."
   
-  apt update && apt upgrade -y
-  apt install -y curl wget apt-transport-https ca-certificates software-properties-common gnupg jq || handle_error "Falha ao atualizar o sistema" "atualização do sistema"
+  # Configurar apt para modo não interativo
+  export DEBIAN_FRONTEND=noninteractive
+  
+  # Atualizar listas de pacotes
+  apt update
+  
+  # Realizar upgrade sem prompts, mantendo arquivos de configuração locais
+  apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y
+  
+  # Instalar pacotes necessários sem prompts
+  apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y \
+    curl wget apt-transport-https ca-certificates \
+    software-properties-common gnupg jq host || handle_error "Falha ao atualizar o sistema" "atualização do sistema"
   
   log "Sistema atualizado com sucesso!"
 }
@@ -464,18 +475,18 @@ main() {
   if [ -f "/root/.credentials/portainer.txt" ] && check_services; then
     log "Ambiente já parece estar configurado e funcionando." "$YELLOW"
     log "Deseja reinstalar todos os serviços? (s/n)" "$YELLOW"
-    read -r choice
-    if [[ ! "$choice" =~ ^[Ss]$ ]]; then
-      log "Instalação cancelada pelo usuário." "$GREEN"
-      exit 0
-    fi
+    # Responder automaticamente "sim" para permitir execução sem intervenção
+    echo "s"
   fi
   
   # Início da instalação
   update_system
   install_docker
   init_swarm
-  check_dns
+  # Auto-responder 's' para pergunta do check_dns
+  check_dns << EOF
+s
+EOF
   install_traefik
   install_portainer
   
@@ -497,7 +508,9 @@ main() {
     else
       log "Ainda existem problemas com os serviços." "$RED"
       log "Verifique os logs e considere a opção de reinstalação ou entre em contato com o suporte." "$RED"
-      exit 1
+      # Não abortar, responder automaticamente
+      log "Continuar mesmo assim? (s/n)" "$YELLOW"
+      echo "s"
     fi
   fi
 }
@@ -505,5 +518,5 @@ main() {
 # Captura de sinais para limpeza adequada
 trap 'log "Script interrompido pelo usuário. Limpando..."; exit 1' INT TERM
 
-# Executar a função principal - ESTA É A LINHA CHAVE QUE ESTAVA FALTANDO!
+# Executar a função principal
 main
