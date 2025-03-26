@@ -367,3 +367,71 @@ check_services() {
     log "Serviço Evolution API: ATIVO" "$GREEN"
   else
     log "Serviço Evolution API: NÃO ENCONTRADO" "$RED"
+  fi
+}
+
+# Função principal
+main() {
+  local domain=""
+  local force=false
+  
+  # Processar argumentos
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -d|--domain)
+        domain="$2"
+        shift 2
+        ;;
+      -f|--force)
+        force=true
+        shift
+        ;;
+      -h|--help)
+        usage
+        ;;
+      *)
+        log "Opção desconhecida: $1" "$RED"
+        usage
+        ;;
+    esac
+  done
+  
+  # Verificar argumentos obrigatórios
+  if [ -z "$domain" ]; then
+    log "Argumento obrigatório faltando: domain" "$RED"
+    usage
+  fi
+  
+  # Verificar se está sendo executado como root
+  check_root
+  
+  # Instalar dependências
+  install_dependencies
+  
+  # Verificar e inicializar Docker Swarm
+  check_swarm
+  
+  # Criar rede
+  create_network
+  
+  # Criar volumes
+  create_volumes
+  
+  # Instalar serviços
+  install_redis "$force"
+  install_postgres "$force"
+  install_evolution "$domain" "$force"
+  
+  # Salvar credenciais
+  save_credentials "$domain"
+  
+  # Verificar status dos serviços
+  check_services
+  
+  log "Instalação concluída com sucesso!" "$GREEN"
+  log "Acesse a Evolution API em: https://api.$(echo "$domain" | sed 's|^https://||' | sed 's|^http://||')" "$GREEN"
+  log "Credenciais salvas em: /root/.credentials/" "$GREEN"
+}
+
+# Iniciar o script
+main "$@"
