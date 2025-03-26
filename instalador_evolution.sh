@@ -1,71 +1,7 @@
-# Função principal
-main() {
-  # Inicializar variáveis
-  local portainer_url=""
-  local portainer_user=""
-  local portainer_password=""
-  local domain=""
-  local systems=""
-  local force_install=false
-  
-  # Processar argumentos
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -p|--portainer-url)
-        portainer_url="$2"
-        shift 2
-        ;;
-      -u|--portainer-user)
-        portainer_user="$2"
-        shift 2
-        ;;
-      -w|--portainer-password)
-        portainer_password="$2"
-        shift 2
-        ;;
-      -d|--domain)
-        domain="$2"
-        shift 2
-        ;;
-      -s|--systems)
-        systems="$2"
-        shift 2
-        ;;
-      -f|--force)
-        force_install=true
-        shift
-        ;;
-      -h|--help)
-        usage
-        ;;
-      *)
-        log "Opção desconhecida: $1" "$RED"
-        usage
-        ;;
-    esac
-  done
-  
-  # Validar argumentos obrigatórios
-  if [ -z "$portainer_url" ] || [ -z "$portainer_user" ] || [ -z "$portainer_password" ] || [ -z "$domain" ] || [ -z "$systems" ]; then
-    log "Argumentos obrigatórios faltando!" "$RED"
-    usage
-  fi
-  
-  # Validar URL do Portainer
-  validate_url "$portainer_url"
-  
-  # Verificar dependências
-  check_dependencies
-  
-  # Iniciar instalação
-  install_systems "$systems" "$domain" "$portainer_url" "$portainer_user" "$portainer_password" "$force_install"
-}
-
-# Iniciar o script
-main "$@"#!/bin/bash
+#!/bin/bash
 #
 # Growth Installer - Script para instalação automatizada de sistemas
-# Versão: 1.1 (Corrigida)
+# Versão: 1.2 (Corrigida)
 # Data: 26/03/2025
 #
 # Este script permite a instalação automatizada de sistemas como:
@@ -87,7 +23,7 @@ LOG_FILE="/var/log/growth-installer.log"
 TEMP_DIR="/tmp/growth-installer"
 
 # Função para exibir mensagens de log
-log() {
+function log() {
   local msg="$1"
   local color="${2:-$GREEN}"
   local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
@@ -95,7 +31,7 @@ log() {
 }
 
 # Função para exibir uso
-usage() {
+function usage() {
   echo "Uso: $0 [opções]"
   echo ""
   echo "Opções:"
@@ -104,7 +40,6 @@ usage() {
   echo "  -w, --portainer-password PWD Senha do Portainer"
   echo "  -d, --domain DOMAIN          Domínio principal (ex: example.com)"
   echo "  -s, --systems SYS1,SYS2,...  Sistemas a instalar (separados por vírgula)"
-  echo "                               Sistemas disponíveis: redis,postgres,evolution"
   echo "  -f, --force                  Força reinstalação mesmo se o sistema já existir"
   echo "  -h, --help                   Mostra esta ajuda"
   echo ""
@@ -114,7 +49,7 @@ usage() {
 }
 
 # Função para validar URL
-validate_url() {
+function validate_url() {
   local url=$1
   if [[ ! $url =~ ^https?:// ]]; then
     log "URL inválida: $url. Deve começar com http:// ou https://" "$RED"
@@ -123,7 +58,7 @@ validate_url() {
 }
 
 # Função para verificar dependências
-check_dependencies() {
+function check_dependencies() {
   local missing_deps=()
   
   # Verificar curl
@@ -145,7 +80,7 @@ check_dependencies() {
 }
 
 # Função para autenticar no Portainer e obter token JWT
-authenticate_portainer() {
+function authenticate_portainer() {
   local portainer_url="$1"
   local username="$2"
   local password="$3"
@@ -160,7 +95,7 @@ authenticate_portainer() {
 EOF
 )
   
-  local response=$(curl -s -X POST \
+local response=$(curl -s -X POST \
     "${portainer_url}/api/auth" \
     -H "Content-Type: application/json" \
     -d "$auth_data")
@@ -184,7 +119,7 @@ EOF
 }
 
 # Função para verificar se um stack existe
-check_stack_exists() {
+function check_stack_exists() {
   local stack_name="$1"
   local portainer_url="$2"
   local auth_token="$3"
@@ -196,6 +131,7 @@ check_stack_exists() {
     -H "Authorization: Bearer ${auth_token}")
   
   # Verificar resposta para debugging
+  mkdir -p "$TEMP_DIR"
   echo "$response" > "${TEMP_DIR}/stacks_response.json"
   
   # Contar quantos stacks têm esse nome exato
@@ -209,7 +145,7 @@ check_stack_exists() {
 }
 
 # Função para verificar se uma rede existe
-check_network_exists() {
+function check_network_exists() {
   local network_name="$1"
   local portainer_url="$2"
   local auth_token="$3"
@@ -230,7 +166,7 @@ check_network_exists() {
 }
 
 # Função para verificar se um volume existe
-check_volume_exists() {
+function check_volume_exists() {
   local volume_name="$1"
   local portainer_url="$2"
   local auth_token="$3"
@@ -241,7 +177,7 @@ check_volume_exists() {
     "${portainer_url}/api/endpoints/1/docker/volumes" \
     -H "Authorization: Bearer ${auth_token}")
   
-  local count=$(echo "$response" | jq -r '.Volumes[] | select(.Name == "'"$volume_name"'") | .Name' | wc -l)
+  local count=$(echo "$response" | jq -r '.Volumes[] | select(.Name == "'"$volume_name"'") | .Name' | wc -l 2>/dev/null || echo "0")
   
   if [ "$count" -gt 0 ]; then
     return 0 # Existe
@@ -251,7 +187,7 @@ check_volume_exists() {
 }
 
 # Função para criar uma rede
-create_network() {
+function create_network() {
   local network_name="$1"
   local portainer_url="$2"
   local auth_token="$3"
@@ -285,7 +221,7 @@ EOF
 }
 
 # Função para criar um volume
-create_volume() {
+function create_volume() {
   local volume_name="$1"
   local portainer_url="$2"
   local auth_token="$3"
@@ -317,7 +253,7 @@ EOF
 }
 
 # Função para remover um stack existente
-remove_stack() {
+function remove_stack() {
   local stack_name="$1"
   local portainer_url="$2"
   local auth_token="$3"
@@ -350,7 +286,7 @@ remove_stack() {
 }
 
 # Função para criar um stack
-create_stack() {
+function create_stack() {
   local stack_name="$1"
   local stack_content="$2"
   local portainer_url="$3"
@@ -396,11 +332,11 @@ EOF
 }
 
 # Função para aguardar um serviço ficar pronto
-wait_for_service() {
+function wait_for_service() {
   local service_name="$1"
   local portainer_url="$2"
   local auth_token="$3"
-  local max_attempts="$4"
+  local max_attempts="${4:-12}"
   
   log "Aguardando serviço '$service_name' ficar pronto..." "$BLUE"
   
@@ -412,15 +348,25 @@ wait_for_service() {
     # Verificar se o serviço existe e está rodando
     if echo "$response" | jq -e '.[] | select(.Spec.Name | contains("'"$service_name"'"))' &>/dev/null; then
       local service=$(echo "$response" | jq -r '.[] | select(.Spec.Name | contains("'"$service_name"'"))')
-      local replicas=$(echo "$service" | jq -r '.Spec.Mode.Replicated.Replicas')
-      local running=$(echo "$service" | jq -r '.ServiceStatus.RunningTasks')
       
-      if [ "$replicas" == "$running" ]; then
-        log "Serviço '$service_name' está pronto! ($running/$replicas réplicas rodando)" "$GREEN"
-        return 0
+      # Verificar se o objeto possui os campos necessários
+      if echo "$service" | jq -e '.Spec.Mode.Replicated' &>/dev/null; then
+        local replicas=$(echo "$service" | jq -r '.Spec.Mode.Replicated.Replicas')
+        if echo "$service" | jq -e '.ServiceStatus.RunningTasks' &>/dev/null; then
+          local running=$(echo "$service" | jq -r '.ServiceStatus.RunningTasks')
+          
+          if [ "$replicas" == "$running" ]; then
+            log "Serviço '$service_name' está pronto! ($running/$replicas réplicas rodando)" "$GREEN"
+            return 0
+          fi
+          
+          log "Serviço '$service_name' iniciando... ($running/$replicas réplicas rodando) - Tentativa $attempt/$max_attempts" "$YELLOW"
+        else
+          log "Serviço '$service_name' detectado, mas sem informações de execução - Tentativa $attempt/$max_attempts" "$YELLOW"
+        fi
+      else
+        log "Serviço '$service_name' detectado, mas sem informações de réplicas - Tentativa $attempt/$max_attempts" "$YELLOW"
       fi
-      
-      log "Serviço '$service_name' iniciando... ($running/$replicas réplicas rodando) - Tentativa $attempt/$max_attempts" "$YELLOW"
     else
       log "Serviço '$service_name' não encontrado - Tentativa $attempt/$max_attempts" "$YELLOW"
     fi
@@ -434,7 +380,7 @@ wait_for_service() {
 }
 
 # Função para gerar arquivo de configuração do Redis
-generate_redis_config() {
+function generate_redis_config() {
   local domain="$1"
   
   cat <<EOF
@@ -462,8 +408,196 @@ networks:
   GrowthNet:
     external: true
     name: GrowthNet
+EOF
+}
+
+# Função para gerar arquivo de configuração do PostgreSQL
+function generate_postgres_config() {
+  local domain="$1"
+  
+  cat <<EOF
+version: "3.7"
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_PASSWORD=b2ecbaa44551df03fa3793b38091cff7
+      - POSTGRES_USER=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - GrowthNet
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
+
+volumes:
+  postgres_data:
+    name: postgres_data
+
+networks:
+  GrowthNet:
+    external: true
+    name: GrowthNet
+EOF
+}
+
+# Função para gerar arquivo de configuração da Evolution API
+function generate_evolution_config() {
+  local domain="$1"
+  
+  # Remover "https://" do domínio se presente
+  local clean_domain=$(echo "$domain" | sed 's|^https://||' | sed 's|^http://||')
+  
+  cat <<EOF
+version: "3.7"
+services:
+  evolution:
+    image: atendai/evolution-api:latest
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - GrowthNet
+    environment:
+      # Configurações Gerais
+      - SERVER_URL=https://api.${clean_domain}
+      - AUTHENTICATION_API_KEY=2dc7b3194ce0704b12f68305f1904ca4
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
+      - DEL_INSTANCE=false
+      - QRCODE_LIMIT=1902
+      - LANGUAGE=pt-BR
+      
+      # Configuração do Cliente
+      - CONFIG_SESSION_PHONE_VERSION=2.3000.1019780779
+      - CONFIG_SESSION_PHONE_CLIENT=GrowthTap
+      - CONFIG_SESSION_PHONE_NAME=Chrome
+      
+      # Configuração do Banco de Dados
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/evolution
+      - DATABASE_CONNECTION_CLIENT_NAME=evolution
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - DATABASE_SAVE_MESSAGE_UPDATE=true
+      - DATABASE_SAVE_DATA_CONTACTS=true
+      - DATABASE_SAVE_DATA_CHATS=true
+      - DATABASE_SAVE_DATA_LABELS=true
+      - DATABASE_SAVE_DATA_HISTORIC=true
+      
+      # Integrações
+      - OPENAI_ENABLED=true
+      - DIFY_ENABLED=true
+      - TYPEBOT_ENABLED=true
+      - TYPEBOT_API_VERSION=latest
+      - CHATWOOT_ENABLED=true
+      - CHATWOOT_MESSAGE_READ=true
+      - CHATWOOT_MESSAGE_DELETE=true
+      - CHATWOOT_IMPORT_DATABASE_CONNECTION_URI=postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/chatwoot?sslmode=disable
+      - CHATWOOT_IMPORT_PLACEHOLDER_MEDIA_MESSAGE=false
+      
+      # Configuração do Cache
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/8
+      - CACHE_REDIS_PREFIX_KEY=evolution
+      - CACHE_REDIS_SAVE_INSTANCES=false
+      - CACHE_LOCAL_ENABLED=false
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
+      labels:
+      - traefik.enable=1
+      - traefik.http.routers.evolution.rule=Host(\`api.${clean_domain}\`)
+      - traefik.http.routers.evolution.entrypoints=websecure
+      - traefik.http.routers.evolution.priority=1
+      - traefik.http.routers.evolution.tls.certresolver=letsencryptresolver
+      - traefik.http.routers.evolution.service=evolution
+      - traefik.http.services.evolution.loadbalancer.server.port=8080
+      - traefik.http.services.evolution.loadbalancer.passHostHeader=true
+
+volumes:
+  evolution_instances:
+    external: true
+    name: evolution_instances
+
+networks:
+  GrowthNet:
+    external: true
+    name: GrowthNet
+EOF
+}
+
+# Função para salvar credenciais
+function save_credentials() {
+  local systems="$1"
+  local domain="$2"
+  local portainer_url="$3"
+  local portainer_user="$4"
+  local portainer_password="$5"
+  
+  # Remover "https://" do domínio se presente
+  local clean_domain=$(echo "$domain" | sed 's|^https://||' | sed 's|^http://||')
+  
+  # Criar diretório para credenciais
+  mkdir -p /root/.credentials
+  chmod 700 /root/.credentials
+  
+  # Arquivo para credenciais do Portainer
+  cat > /root/.credentials/portainer.txt << EOF
+Portainer Admin Credentials
+URL: ${portainer_url}
+Username: ${portainer_user}
+Password: ${portainer_password}
+EOF
+  chmod 600 /root/.credentials/portainer.txt
+  
+  # Arquivo para cada sistema instalado
+  for system in ${systems//,/ }; do
+    case "$system" in
+      "redis")
+        cat > /root/.credentials/redis.txt << EOF
+Redis Information
+URL: redis://redis:6379
+Network: GrowthNet
+Volume: redis_data
+EOF
+        ;;
+      "postgres")
+        cat > /root/.credentials/postgres.txt << EOF
+PostgreSQL Information
+Host: postgres
+Port: 5432
+User: postgres
+Password: b2ecbaa44551df03fa3793b38091cff7
+Network: GrowthNet
+Volume: postgres_data
+EOF
+        ;;
+      "evolution")
+        cat > /root/.credentials/evolution.txt << EOF
+Evolution API Information
+URL: https://api.${clean_domain}
+API Key: 2dc7b3194ce0704b12f68305f1904ca4
+Network: GrowthNet
+Volume: evolution_instances
+Database: postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres:5432/evolution
+EOF
+        ;;
+    esac
+    chmod 600 /root/.credentials/${system}.txt
+  done
+  
+  log "Credenciais salvas em /root/.credentials/" "$GREEN"
+}
+
 # Função para instalar sistemas
-install_systems() {
+function install_systems() {
   local systems="$1"
   local domain="$2"
   local portainer_url="$3"
@@ -594,34 +728,68 @@ install_systems() {
   log "Instalação concluída!" "$GREEN"
 }
 
-# Função para gerar arquivo de configuração do PostgreSQL
-generate_postgres_config() {
-  local domain="$1"
+# Função principal
+function main() {
+  # Inicializar variáveis
+  local portainer_url=""
+  local portainer_user=""
+  local portainer_password=""
+  local domain=""
+  local systems=""
+  local force_install=false
   
-  cat <<EOF
-version: "3.7"
-services:
-  postgres:
-    image: postgres:13
-    environment:
-      - POSTGRES_PASSWORD=b2ecbaa44551df03fa3793b38091cff7
-      - POSTGRES_USER=postgres
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-        - node.role == manager
+  # Processar argumentos
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p|--portainer-url)
+        portainer_url="$2"
+        shift 2
+        ;;
+      -u|--portainer-user)
+        portainer_user="$2"
+        shift 2
+        ;;
+      -w|--portainer-password)
+        portainer_password="$2"
+        shift 2
+        ;;
+      -d|--domain)
+        domain="$2"
+        shift 2
+        ;;
+      -s|--systems)
+        systems="$2"
+        shift 2
+        ;;
+      -f|--force)
+        force_install=true
+        shift
+        ;;
+      -h|--help)
+        usage
+        ;;
+      *)
+        log "Opção desconhecida: $1" "$RED"
+        usage
+        ;;
+    esac
+  done
+  
+  # Validar argumentos obrigatórios
+  if [ -z "$portainer_url" ] || [ -z "$portainer_user" ] || [ -z "$portainer_password" ] || [ -z "$domain" ] || [ -z "$systems" ]; then
+    log "Argumentos obrigatórios faltando!" "$RED"
+    usage
+  fi
+  
+  # Validar URL do Portainer
+  validate_url "$portainer_url"
+  
+  # Verificar dependências
+  check_dependencies
+  
+  # Iniciar instalação
+  install_systems "$systems" "$domain" "$portainer_url" "$portainer_user" "$portainer_password" "$force_install"
+}
 
-volumes:
-  postgres_data:
-    name: postgres_data
-
-networks:
-  GrowthNet:
-    external: true
-    name: GrowthNet
+# Iniciar o script
+main "$@"
