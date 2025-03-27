@@ -1,6 +1,6 @@
 #!/bin/bash
 # Script para configuração de Docker Swarm, Portainer e Traefik
-# Versão: 3.0 - Alinhado com os YMLs de referência
+# Versão: 4.0 - Corrigido para senha automática do Portainer
 # Data: 27/03/2025
 
 # Cores para melhor visualização
@@ -95,7 +95,14 @@ install_docker() {
   
   apt remove -y docker docker-engine docker.io containerd runc || true
   
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  # Adicionar a chave GPG oficial do Docker (com tratamento para evitar prompts)
+  if [ -f "/usr/share/keyrings/docker-archive-keyring.gpg" ]; then
+    log "Arquivo de chave GPG do Docker já existe, removendo para atualizar..."
+    rm -f /usr/share/keyrings/docker-archive-keyring.gpg
+  fi
+  
+  # Usar redirecionamento para evitar prompts
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
   
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
   
@@ -293,26 +300,16 @@ install_portainer() {
   # Criar diretório para stack file
   mkdir -p /opt/stacks/portainer
   
-  # Criar compose file para o Portainer
+  # Gerar senha aleatória para admin
+  ADMIN_PASSWORD=$(openssl rand -base64 12)
+  
+  # Usar a imagem standalone do Portainer (sem agent) para permitir definir senha
   cat > /opt/stacks/portainer/docker-compose.yml << EOF
 version: "3.7"
 services:
-  agent:
-    image: portainer/agent:latest
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/docker/volumes:/var/lib/docker/volumes
-    networks:
-      - ${NETWORK_NAME}
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.platform.os == linux]
-
   portainer:
     image: portainer/portainer-ce:latest
-    # Remova a opção de senha do comando e use volumes para inicialização
-    command: -H tcp://tasks.agent:9001 --tlsskipverify
+    command: --admin-password=\$\$2y\$05\$\$\$(docker run --rm httpd:2.4-alpine htpasswd -bnBC 10 "" "${ADMIN_PASSWORD}" | tr -d ':\n' | sed 's/\$\$/\$\$\$\$/g')
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
@@ -347,10 +344,22 @@ EOF
   # Implantar o stack do Portainer
   docker stack deploy -c /opt/stacks/portainer/docker-compose.yml portainer || handle_error "Falha ao criar stack do Portainer" "implantação do Portainer"
   
+  # Salvar as credenciais em um arquivo seguro
+  mkdir -p /root/.credentials
+  chmod 700 /root/.credentials
+  cat > /root/.credentials/portainer.txt << EOF
+Portainer Admin Credentials
+URL: https://${PORTAINER_DOMAIN}
+Username: admin
+Password: ${ADMIN_PASSWORD}
+EOF
+  chmod 600 /root/.credentials/portainer.txt
+  
   log "Stack do Portainer implantado com sucesso!"
+  log "Credenciais salvas em: /root/.credentials/portainer.txt" "$YELLOW"
   log "URL do Portainer: https://${PORTAINER_DOMAIN}" "$YELLOW"
-  log "No primeiro acesso, você deverá definir a senha do admin manualmente" "$YELLOW"
-  log "Acesse https://${PORTAINER_DOMAIN} para completar a configuração" "$YELLOW"
+  log "Usuário: admin" "$YELLOW"
+  log "Senha: ${ADMIN_PASSWORD}" "$YELLOW"
 }
 
 # Verificar saúde dos serviços
@@ -371,7 +380,6 @@ check_services() {
   # Verificar status de execução dos serviços
   local traefik_replicas=$(docker service ls --filter "name=traefik_traefik" --format "{{.Replicas}}")
   local portainer_replicas=$(docker service ls --filter "name=portainer_portainer" --format "{{.Replicas}}")
-  local agent_status=$(docker service ls --filter "name=portainer_agent" --format "{{.Replicas}}")
   
   if [[ "$traefik_replicas" != *"1/1"* ]]; then
     log "Serviço Traefik não está saudável: $traefik_replicas" "$RED"
@@ -380,13 +388,6 @@ check_services() {
   
   if [[ "$portainer_replicas" != *"1/1"* ]]; then
     log "Serviço Portainer não está saudável: $portainer_replicas" "$RED"
-    return 1
-  fi
-  
-  # Verificar status do agent (deve ter uma réplica por nó)
-  local node_count=$(docker node ls | grep -c "Ready")
-  if [[ "$agent_status" != *"$node_count/$node_count"* ]]; then
-    log "Serviço Portainer Agent não está saudável: $agent_status (esperado $node_count/$node_count)" "$RED"
     return 1
   fi
   
@@ -478,7 +479,16 @@ troubleshoot_services() {
 
 # Função principal de execução
 main() {
+  # Verificar se a configuração já foi concluída
   log "Iniciando configuração do ambiente Swarm..."
+  
+  # Verificar se a configuração já foi concluída
+  if [ -f "/root/.credentials/portainer.txt" ] && check_services; then
+    log "Ambiente já parece estar configurado e funcionando." "$YELLOW"
+    log "Deseja reinstalar todos os serviços? (s/n)" "$YELLOW"
+    # Responder automaticamente "sim" para permitir execução sem intervenção
+    echo "s"
+  fi
   
   update_system
   install_docker
@@ -496,7 +506,9 @@ EOF
   if check_services; then
     log "Configuração concluída com sucesso!" "$GREEN"
     log "Portainer está disponível em: https://${PORTAINER_DOMAIN}" "$GREEN"
-    log "Configure uma senha no primeiro acesso ao Portainer" "$GREEN"
+    log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+    log "Usuário: admin" "$GREEN"
+    log "Senha: ${ADMIN_PASSWORD}" "$GREEN"
   else
     log "Alguns serviços não estão funcionando corretamente." "$RED"
     troubleshoot_services
@@ -506,7 +518,9 @@ EOF
       log "Todos os problemas foram resolvidos!" "$GREEN"
       log "Configuração concluída com sucesso!" "$GREEN"
       log "Portainer está disponível em: https://${PORTAINER_DOMAIN}" "$GREEN"
-      log "Acesse a URL acima para definir a senha de administrador no primeiro acesso" "$GREEN"
+      log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+      log "Usuário: admin" "$GREEN"
+      log "Senha: ${ADMIN_PASSWORD}" "$GREEN"
     else
       log "Ainda existem problemas com os serviços." "$RED"
       log "Verifique os logs em /var/log/swarm-setup.log e /var/log/traefik/" "$RED"
