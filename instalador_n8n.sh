@@ -54,9 +54,23 @@ error_exit() {
 
 # Criar volumes Docker necessários
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
-docker volume create n8n_data${SUFFIX} 2>/dev/null || echo "Volume n8n_data${SUFFIX} já existe."
-docker volume create postgres_data${SUFFIX} 2>/dev/null || echo "Volume postgres_data${SUFFIX} já existe."
-docker volume create redis_data${SUFFIX} 2>/dev/null || echo "Volume redis_data${SUFFIX} já existe."
+
+# Definir nomes dos volumes sem sufixos para compatibilidade
+if [ -n "$SUFFIX" ]; then
+    # Com sufixo - criar volumes com sufixo
+    N8N_VOLUME="n8n_data${SUFFIX}"
+    PG_VOLUME="postgres_data${SUFFIX}"
+    REDIS_VOLUME="redis_data${SUFFIX}"
+else
+    # Sem sufixo - usar nomes padrão como nos exemplos
+    N8N_VOLUME="n8n_data"
+    PG_VOLUME="postgres_data"
+    REDIS_VOLUME="redis_data"
+fi
+
+docker volume create $N8N_VOLUME 2>/dev/null || echo "Volume $N8N_VOLUME já existe."
+docker volume create $PG_VOLUME 2>/dev/null || echo "Volume $PG_VOLUME já existe."
+docker volume create $REDIS_VOLUME 2>/dev/null || echo "Volume $REDIS_VOLUME já existe."
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 docker network inspect GrowthNet >/dev/null 2>&1 || {
@@ -72,9 +86,9 @@ version: '3.7'
 services:
   redis:
     image: redis:latest
-    command: redis-server --appendonly yes
+    command: ["redis-server", "--appendonly", "yes", "--port", "6379"]
     volumes:
-      - redis_data${SUFFIX}:/data
+      - ${REDIS_VOLUME}:/data
     networks:
       - GrowthNet
     deploy:
@@ -82,7 +96,11 @@ services:
       replicas: 1
       placement:
         constraints:
-        - node.role == manager
+          - node.role == worker
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2048M
       update_config:
         parallelism: 1
         delay: 10s
@@ -93,12 +111,14 @@ services:
         max_attempts: 3
 
 volumes:
-  redis_data${SUFFIX}:
+  ${REDIS_VOLUME}:
     external: true
+    name: ${REDIS_VOLUME}
 
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Criar arquivo docker-compose para a stack PostgreSQL
@@ -107,14 +127,13 @@ cat > "${PG_STACK_NAME}.yaml" <<EOL
 version: '3.7'
 services:
   postgres:
-    image: postgres:13
+    image: postgres:14
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_USER=postgres
-      # Inicializa o banco de dados necessário para o n8n
-      - POSTGRES_DB=n8n_queue${SUFFIX}
+      - PG_MAX_CONNECTIONS=500
     volumes:
-      - postgres_data${SUFFIX}:/var/lib/postgresql/data
+      - ${PG_VOLUME}:/var/lib/postgresql/data
     networks:
       - GrowthNet
     deploy:
@@ -122,7 +141,7 @@ services:
       replicas: 1
       placement:
         constraints:
-        - node.role == manager
+          - node.role == manager
       update_config:
         parallelism: 1
         delay: 10s
@@ -131,14 +150,20 @@ services:
         condition: any
         delay: 5s
         max_attempts: 3
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
 
 volumes:
-  postgres_data${SUFFIX}:
+  ${PG_VOLUME}:
     external: true
+    name: ${PG_VOLUME}
 
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Criar arquivo docker-compose para a stack n8n
@@ -155,16 +180,16 @@ services:
     networks:
       - GrowthNet
     environment:
+      # Payload size com formato correto
+      - N8N_PAYLOAD_SIZE_MAX=64mb
+
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres${SUFFIX}
+      - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-
-      # Payload size (valor maior para uploads)
-      - N8N_PAYLOAD_SIZE_MAX=67108864
 
       # Encryption Key
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -174,8 +199,6 @@ services:
       - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
       - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
       - N8N_PROTOCOL=https
-      - N8N_PORT=5678
-      - NODE_BASE_URL=https://${N8N_EDITOR_DOMAIN}
 
       # Modo do Node
       - NODE_ENV=production
@@ -189,7 +212,7 @@ services:
       - N8N_NODE_PATH=/home/node/.n8n/nodes
 
       # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis${SUFFIX}
+      - QUEUE_BULL_REDIS_HOST=redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_DB=2
       - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
@@ -200,13 +223,13 @@ services:
       - GENERIC_TIMEZONE=America/Sao_Paulo
       - TZ=America/Sao_Paulo
     volumes:
-      - n8n_data${SUFFIX}:/home/node/.n8n
+      - ${N8N_VOLUME}:/home/node/.n8n
     deploy:
       mode: replicated
       replicas: 1
       placement:
         constraints:
-          - node.role == manager
+          - node.role == worker
       resources:
         limits:
           cpus: "1"
@@ -221,12 +244,13 @@ services:
         max_attempts: 3
       labels:
         - traefik.enable=true
-        - traefik.docker.network=GrowthNet
-        - "traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)"
+        - traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)
         - traefik.http.routers.n8n_editor${SUFFIX}.entrypoints=websecure
-        - traefik.http.routers.n8n_editor${SUFFIX}.tls=true
-        - traefik.http.routers.n8n_editor${SUFFIX}.tls.certresolver=letsencrypt
+        - traefik.http.routers.n8n_editor${SUFFIX}.priority=1
+        - traefik.http.routers.n8n_editor${SUFFIX}.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.n8n_editor${SUFFIX}.service=n8n_editor${SUFFIX}
         - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.server.port=5678
+        - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.passHostHeader=1
 
 ## --------------------------- n8n Webhook --------------------------- ##
 
@@ -236,16 +260,16 @@ services:
     networks:
       - GrowthNet
     environment:
+      # Payload size com formato correto
+      - N8N_PAYLOAD_SIZE_MAX=64mb
+
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres${SUFFIX}
+      - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-
-      # Payload size (valor maior para uploads)
-      - N8N_PAYLOAD_SIZE_MAX=67108864
 
       # Encryption Key
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -255,8 +279,6 @@ services:
       - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
       - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
       - N8N_PROTOCOL=https
-      - N8N_PORT=5678
-      - NODE_BASE_URL=https://${N8N_EDITOR_DOMAIN}
 
       # Modo do Node
       - NODE_ENV=production
@@ -270,7 +292,7 @@ services:
       - N8N_NODE_PATH=/home/node/.n8n/nodes
 
       # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis${SUFFIX}
+      - QUEUE_BULL_REDIS_HOST=redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_DB=2
       - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
@@ -281,13 +303,13 @@ services:
       - GENERIC_TIMEZONE=America/Sao_Paulo
       - TZ=America/Sao_Paulo
     volumes:
-      - n8n_data${SUFFIX}:/home/node/.n8n      
+      - ${N8N_VOLUME}:/home/node/.n8n      
     deploy:
       mode: replicated
       replicas: 1
       placement:
         constraints:
-          - node.role == manager
+          - node.role == worker
       resources:
         limits:
           cpus: "1"
@@ -302,12 +324,13 @@ services:
         max_attempts: 3
       labels:
         - traefik.enable=true
-        - traefik.docker.network=GrowthNet
-        - "traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)"
+        - traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)
         - traefik.http.routers.n8n_webhook${SUFFIX}.entrypoints=websecure
-        - traefik.http.routers.n8n_webhook${SUFFIX}.tls=true
-        - traefik.http.routers.n8n_webhook${SUFFIX}.tls.certresolver=letsencrypt
+        - traefik.http.routers.n8n_webhook${SUFFIX}.priority=1
+        - traefik.http.routers.n8n_webhook${SUFFIX}.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.n8n_webhook${SUFFIX}.service=n8n_webhook${SUFFIX}
         - traefik.http.services.n8n_webhook${SUFFIX}.loadbalancer.server.port=5678
+        - traefik.http.services.n8n_webhook${SUFFIX}.loadbalancer.passHostHeader=1
 
 ## --------------------------- n8n Worker --------------------------- ##
 
@@ -317,16 +340,16 @@ services:
     networks:
       - GrowthNet
     environment:
+      # Payload size com formato correto
+      - N8N_PAYLOAD_SIZE_MAX=64mb
+
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres${SUFFIX}
+      - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-
-      # Payload size (valor maior para uploads)
-      - N8N_PAYLOAD_SIZE_MAX=67108864
 
       # Encryption Key
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -336,8 +359,6 @@ services:
       - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
       - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
       - N8N_PROTOCOL=https
-      - N8N_PORT=5678
-      - NODE_BASE_URL=https://${N8N_EDITOR_DOMAIN}
 
       # Modo do Node
       - NODE_ENV=production
@@ -351,7 +372,7 @@ services:
       - N8N_NODE_PATH=/home/node/.n8n/nodes
 
       # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis${SUFFIX}
+      - QUEUE_BULL_REDIS_HOST=redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_DB=2
       - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
@@ -362,13 +383,13 @@ services:
       - GENERIC_TIMEZONE=America/Sao_Paulo
       - TZ=America/Sao_Paulo
     volumes:
-      - n8n_data${SUFFIX}:/home/node/.n8n
+      - ${N8N_VOLUME}:/home/node/.n8n
     deploy:
       mode: replicated
       replicas: 1
       placement:
         constraints:
-          - node.role == manager
+          - node.role == worker
       resources:
         limits:
           cpus: "1"
@@ -383,12 +404,14 @@ services:
         max_attempts: 3
 
 volumes:
-  n8n_data${SUFFIX}:
+  ${N8N_VOLUME}:
     external: true
+    name: ${N8N_VOLUME}
 
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Verificar se jq está instalado
@@ -630,6 +653,29 @@ if [ $? -ne 0 ]; then
     echo -e "${AMARELO}Aviso: Problemas ao implementar PostgreSQL, mas continuando...${RESET}"
 fi
 
+# Criar banco de dados explicitamente para garantir
+echo -e "${VERDE}Verificando se o banco de dados já existe e criando se necessário...${RESET}"
+# Aguardar um pouco para o PostgreSQL inicializar completamente
+sleep 5
+
+# Tentar encontrar o container do PostgreSQL
+PG_CONTAINER=$(docker ps --filter name=postgres${SUFFIX} --format "{{.ID}}" | head -n1)
+if [ -n "$PG_CONTAINER" ]; then
+    echo -e "${VERDE}Container do PostgreSQL encontrado: ${PG_CONTAINER}${RESET}"
+    
+    # Verificar se o banco de dados já existe
+    DB_EXISTS=$(docker exec -i $PG_CONTAINER psql -U postgres -t -c "SELECT 1 FROM pg_database WHERE datname='n8n_queue${SUFFIX}';" 2>/dev/null)
+    
+    if [ -z "$DB_EXISTS" ] || [[ "$DB_EXISTS" != *"1"* ]]; then
+        echo -e "${VERDE}Criando banco de dados n8n_queue${SUFFIX}...${RESET}"
+        docker exec -i $PG_CONTAINER psql -U postgres -c "CREATE DATABASE \"n8n_queue${SUFFIX}\";"
+        docker exec -i $PG_CONTAINER psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE \"n8n_queue${SUFFIX}\" TO postgres;"
+        echo -e "${VERDE}Banco de dados criado e privilégios concedidos.${RESET}"
+    else
+        echo -e "${VERDE}Banco de dados n8n_queue${SUFFIX} já existe.${RESET}"
+    fi
+fi
+
 # Adicionar uma pausa para garantir que os serviços anteriores sejam inicializados
 echo -e "${VERDE}Aguardando 15 segundos para inicialização dos serviços Redis e PostgreSQL...${RESET}"
 sleep 15
@@ -651,7 +697,7 @@ Editor URL: https://${N8N_EDITOR_DOMAIN}
 Webhook URL: https://${N8N_WEBHOOK_DOMAIN}
 Encryption Key: ${N8N_ENCRYPTION_KEY}
 Postgres Password: ${POSTGRES_PASSWORD}
-Database: postgresql://postgres:${POSTGRES_PASSWORD}@postgres${SUFFIX}:5432/n8n_queue${SUFFIX}
+Database: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/n8n_queue${SUFFIX}
 EOF
     chmod 600 "${CREDENTIALS_DIR}/n8n${SUFFIX}.txt"
     echo -e "${VERDE}Credenciais do n8n salvas em ${CREDENTIALS_DIR}/n8n${SUFFIX}.txt${RESET}"
@@ -669,7 +715,7 @@ cat << EOF > /tmp/n8n${SUFFIX}_output.json
   "n8nStackName": "${N8N_STACK_NAME}",
   "redisStackName": "${REDIS_STACK_NAME}",
   "postgresStackName": "${PG_STACK_NAME}",
-  "databaseUri": "postgresql://postgres:${POSTGRES_PASSWORD}@postgres${SUFFIX}:5432/n8n_queue${SUFFIX}"
+  "databaseUri": "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/n8n_queue${SUFFIX}"
 }
 EOF
 
@@ -685,4 +731,4 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${N8N_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu n8n através do endereço:${RESET} https://${N8N_EDITOR_DOMAIN}"
-echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"parallelism: 1
+echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
