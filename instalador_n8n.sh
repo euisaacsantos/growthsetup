@@ -149,7 +149,7 @@ services:
 
 ## --------------------------- n8n Editor --------------------------- ##
 
-  n8n_editor${SUFFIX}:
+  n8n_editor:
     image: n8nio/n8n:latest
     command: start
     networks:
@@ -221,20 +221,16 @@ services:
         max_attempts: 3
       labels:
         - traefik.enable=true
-        - traefik.enable=true
         - traefik.docker.network=GrowthNet
-        - traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(`${N8N_EDITOR_DOMAIN}`)
+        - "traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)"
         - traefik.http.routers.n8n_editor${SUFFIX}.entrypoints=websecure
         - traefik.http.routers.n8n_editor${SUFFIX}.tls=true
         - traefik.http.routers.n8n_editor${SUFFIX}.tls.certresolver=letsencrypt
         - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.server.port=5678
-        - traefik.http.middlewares.n8neditor${SUFFIX}-redirectscheme.redirectscheme.scheme=https
-        - traefik.http.middlewares.n8neditor${SUFFIX}-redirectscheme.redirectscheme.permanent=true
-        - traefik.http.routers.n8n_editor${SUFFIX}.middlewares=n8neditor${SUFFIX}-redirectscheme
 
 ## --------------------------- n8n Webhook --------------------------- ##
 
-  n8n_webhook${SUFFIX}:
+  n8n_webhook:
     image: n8nio/n8n:latest
     command: webhook
     networks:
@@ -259,6 +255,8 @@ services:
       - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
       - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
       - N8N_PROTOCOL=https
+      - N8N_PORT=5678
+      - NODE_BASE_URL=https://${N8N_EDITOR_DOMAIN}
 
       # Modo do Node
       - NODE_ENV=production
@@ -305,7 +303,7 @@ services:
       labels:
         - traefik.enable=true
         - traefik.docker.network=GrowthNet
-        - traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(`${N8N_WEBHOOK_DOMAIN}`)
+        - "traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)"
         - traefik.http.routers.n8n_webhook${SUFFIX}.entrypoints=websecure
         - traefik.http.routers.n8n_webhook${SUFFIX}.tls=true
         - traefik.http.routers.n8n_webhook${SUFFIX}.tls.certresolver=letsencrypt
@@ -313,7 +311,7 @@ services:
 
 ## --------------------------- n8n Worker --------------------------- ##
 
-  n8n_worker${SUFFIX}:
+  n8n_worker:
     image: n8nio/n8n:latest
     command: worker --concurrency=10
     networks:
@@ -338,6 +336,8 @@ services:
       - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
       - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
       - N8N_PROTOCOL=https
+      - N8N_PORT=5678
+      - NODE_BASE_URL=https://${N8N_EDITOR_DOMAIN}
 
       # Modo do Node
       - NODE_ENV=production
@@ -685,4 +685,4 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${N8N_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu n8n através do endereço:${RESET} https://${N8N_EDITOR_DOMAIN}"
-echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
+echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"parallelism: 1
