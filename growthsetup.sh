@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script para configuração de Docker Swarm, Portainer e Traefik com subdomínio personalizável
-# Versão: 2.0 - Com verificações de falhas e recursos de recuperação
-# Data: 26/03/2025
+# Versão: 3.0 - Implementação de stacks via docker-compose.yml
+# Data: 27/03/2025
 
 # Cores para melhor visualização
 GREEN='\033[0;32m'
@@ -83,11 +83,10 @@ FULL_DOMAIN="${PORTAINER_SUBDOMAIN}.${DOMAIN}"
 log "Configurando com Portainer em: ${FULL_DOMAIN}"
 log "Email para certificados SSL: ${EMAIL}"
 
-# Função para reinstalar o Ubuntu 20.04
+# Função para reinstalar o Ubuntu 20.04 (não modificada)
 reinstall_ubuntu() {
   log "Iniciando reinstalação do Ubuntu 20.04..." "$YELLOW"
   
-  # Aqui você pode adicionar comandos para salvar dados importantes antes da reinstalação
   mkdir -p /backup
   
   if [ -d "/root/.credentials" ]; then
@@ -101,20 +100,16 @@ reinstall_ubuntu() {
   exit 1
 }
 
-# Atualizar o sistema
+# Atualizar o sistema (não modificada)
 update_system() {
   log "Atualizando o sistema..."
   
-  # Configurar apt para modo não interativo
   export DEBIAN_FRONTEND=noninteractive
   
-  # Atualizar listas de pacotes
   apt update
   
-  # Realizar upgrade sem prompts, mantendo arquivos de configuração locais
   apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y
   
-  # Instalar pacotes necessários sem prompts
   apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y \
     curl wget apt-transport-https ca-certificates \
     software-properties-common gnupg jq host || handle_error "Falha ao atualizar o sistema" "atualização do sistema"
@@ -122,50 +117,40 @@ update_system() {
   log "Sistema atualizado com sucesso!"
 }
 
-# Instalar Docker
+# Instalar Docker (não modificada)
 install_docker() {
   log "Instalando Docker..."
   
-  # Remover versões antigas do Docker, se existirem
   apt remove -y docker docker-engine docker.io containerd runc || true
   
-  # Adicionar a chave GPG oficial do Docker
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
   
-  # Configurar o repositório estável do Docker
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
   
-  # Instalar Docker Engine
   apt update
-  apt install -y docker-ce docker-ce-cli containerd.io || handle_error "Falha ao instalar o Docker" "instalação do Docker"
+  apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || handle_error "Falha ao instalar o Docker" "instalação do Docker"
   
-  # Iniciar e habilitar o Docker
   systemctl enable --now docker
   
-  # Verificar instalação
   docker --version || throw "Docker não foi instalado corretamente"
   
   log "Docker instalado com sucesso!"
 }
 
-# Inicializar Docker Swarm
+# Inicializar Docker Swarm (não modificada)
 init_swarm() {
   log "Inicializando o Docker Swarm..."
   
-  # Verificar se o Swarm já está inicializado
   if docker info | grep -q "Swarm: active"; then
     log "Docker Swarm já está ativo neste nó." "$YELLOW"
   else
-    # Obter IP do servidor para o Swarm
     SERVER_IP=$(hostname -I | awk '{print $1}')
     
-    # Iniciar o Docker Swarm
     docker swarm init --advertise-addr "$SERVER_IP" || handle_error "Falha ao inicializar o Docker Swarm" "inicialização do Swarm"
     
     log "Docker Swarm inicializado com sucesso!"
   fi
   
-  # Criar rede para os serviços
   if ! docker network ls | grep -q "traefik-public"; then
     docker network create --driver=overlay traefik-public || handle_error "Falha ao criar rede traefik-public" "criação de rede"
     log "Rede 'traefik-public' criada com sucesso!"
@@ -174,11 +159,10 @@ init_swarm() {
   fi
 }
 
-# Verificar configuração de DNS
+# Verificar configuração de DNS (não modificada)
 check_dns() {
   log "Verificando configuração DNS para ${FULL_DOMAIN}..."
   
-  # Registrar a tentativa de resolução
   local dns_check=$(host ${FULL_DOMAIN} 2>&1 || true)
   log "Resultado da verificação DNS: ${dns_check}" "$BLUE"
   
@@ -187,12 +171,10 @@ check_dns() {
     log "Certifique-se de que o DNS está configurado corretamente apontando para o IP deste servidor." "$YELLOW"
     log "Os certificados SSL não funcionarão até que o DNS esteja corretamente configurado." "$YELLOW"
     
-    # Obter o IP do servidor
     local server_ip=$(hostname -I | awk '{print $1}')
     log "IP deste servidor: ${server_ip}" "$YELLOW"
     log "Configure seu DNS para que ${FULL_DOMAIN} aponte para ${server_ip}" "$YELLOW"
     
-    # Perguntar se deseja continuar
     log "Deseja continuar mesmo assim? (s/n)" "$YELLOW"
     read -r choice
     if [[ ! "$choice" =~ ^[Ss]$ ]]; then
@@ -204,14 +186,14 @@ check_dns() {
   fi
 }
 
-# Instalar e configurar Traefik
+# Instalar e configurar Traefik usando docker-compose e stack
 install_traefik() {
-  log "Instalando Traefik..."
+  log "Instalando Traefik usando Docker Stack..."
   
   # Remover instalação anterior se existir
-  docker service rm traefik || true
+  docker stack rm traefik || true
   
-  # Esperar serviço ser removido
+  # Esperar para serviço ser removido
   sleep 10
   
   # Criar diretórios para o Traefik
@@ -288,35 +270,56 @@ EOF
   # Garantir as permissões corretas no diretório de certificados
   chmod -R 755 /opt/traefik/certificates
   
-  # Usar versão específica do Traefik para maior estabilidade
-  docker service create \
-    --name traefik \
-    --constraint=node.role==manager \
-    --publish 80:80 \
-    --publish 443:443 \
-    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
-    --mount type=bind,source=/opt/traefik/traefik.yml,target=/etc/traefik/traefik.yml \
-    --mount type=bind,source=/opt/traefik/config,target=/etc/traefik/config \
-    --mount type=bind,source=/opt/traefik/certificates,target=/etc/traefik/certificates \
-    --network traefik-public \
-    --label "traefik.enable=true" \
-    --label "traefik.http.routers.traefik-secure.entrypoints=websecure" \
-    --label "traefik.http.routers.traefik-secure.rule=Host(\`traefik.${DOMAIN}\`)" \
-    --label "traefik.http.routers.traefik-secure.tls=true" \
-    --label "traefik.http.routers.traefik-secure.service=api@internal" \
-    --label "traefik.http.routers.traefik-secure.middlewares=secure-headers@file" \
-    --label "traefik.http.services.traefik.loadbalancer.server.port=8080" \
-    traefik:v2.10.4 || handle_error "Falha ao criar serviço Traefik" "instalação do Traefik"
+  # Criar compose file para o Traefik
+  mkdir -p /opt/traefik/stack
+  cat > /opt/traefik/stack/docker-compose.yml << EOF
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:v2.10.4
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    networks:
+      - traefik-public
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/traefik/traefik.yml:/etc/traefik/traefik.yml
+      - /opt/traefik/config:/etc/traefik/config
+      - /opt/traefik/certificates:/etc/traefik/certificates
+    ports:
+      - "80:80"
+      - "443:443"
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.traefik-secure.entrypoints=websecure"
+        - "traefik.http.routers.traefik-secure.rule=Host(\`traefik.${DOMAIN}\`)"
+        - "traefik.http.routers.traefik-secure.tls=true"
+        - "traefik.http.routers.traefik-secure.service=api@internal"
+        - "traefik.http.routers.traefik-secure.middlewares=secure-headers@file"
+        - "traefik.http.services.traefik.loadbalancer.server.port=8080"
+
+networks:
+  traefik-public:
+    external: true
+EOF
   
-  log "Traefik instalado com sucesso!"
+  # Implantar o stack do Traefik
+  docker stack deploy -c /opt/traefik/stack/docker-compose.yml traefik || handle_error "Falha ao criar stack do Traefik" "implantação do Traefik"
+  
+  log "Stack do Traefik implantado com sucesso!"
 }
 
-# Instalar e configurar Portainer
+# Instalar e configurar Portainer usando docker-compose e stack
 install_portainer() {
   log "Instalando Portainer com subdomínio: ${FULL_DOMAIN}..."
   
   # Remover instalação anterior se existir
-  docker service rm portainer || true
+  docker stack rm portainer || true
   
   # Esperar serviço ser removido
   sleep 10
@@ -327,24 +330,41 @@ install_portainer() {
   
   # Criar diretório para dados do Portainer
   mkdir -p /opt/portainer/data
+  mkdir -p /opt/portainer/stack
   
-  # Instalar uma versão específica do Portainer para maior estabilidade
-  docker service create \
-    --name portainer \
-    --constraint=node.role==manager \
-    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
-    --mount type=bind,source=/opt/portainer/data,target=/data \
-    --network traefik-public \
-    --label "traefik.enable=true" \
-    --label "traefik.http.routers.portainer-secure.entrypoints=websecure" \
-    --label "traefik.http.routers.portainer-secure.rule=Host(\`${FULL_DOMAIN}\`)" \
-    --label "traefik.http.routers.portainer-secure.tls=true" \
-    --label "traefik.http.routers.portainer-secure.tls.certresolver=letsencrypt" \
-    --label "traefik.http.routers.portainer-secure.service=portainer" \
-    --label "traefik.http.services.portainer.loadbalancer.server.port=9000" \
-    --label "traefik.http.middlewares.portainer-secure.headers.sslredirect=true" \
-    portainer/portainer-ce:2.19.0 \
-    --admin-password="$ADMIN_PASSWORD_HASH" || handle_error "Falha ao criar serviço Portainer" "instalação do Portainer"
+  # Criar compose file para o Portainer
+  cat > /opt/portainer/stack/docker-compose.yml << EOF
+version: '3.8'
+
+services:
+  portainer:
+    image: portainer/portainer-ce:2.19.0
+    command: --admin-password="${ADMIN_PASSWORD_HASH}"
+    networks:
+      - traefik-public
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/portainer/data:/data
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.portainer-secure.entrypoints=websecure"
+        - "traefik.http.routers.portainer-secure.rule=Host(\`${FULL_DOMAIN}\`)"
+        - "traefik.http.routers.portainer-secure.tls=true"
+        - "traefik.http.routers.portainer-secure.tls.certresolver=letsencrypt"
+        - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+        - "traefik.http.middlewares.portainer-secure.headers.sslredirect=true"
+
+networks:
+  traefik-public:
+    external: true
+EOF
+  
+  # Implantar o stack do Portainer
+  docker stack deploy -c /opt/portainer/stack/docker-compose.yml portainer || handle_error "Falha ao criar stack do Portainer" "implantação do Portainer"
   
   # Salvar as credenciais em um arquivo seguro
   mkdir -p /root/.credentials
@@ -357,7 +377,7 @@ Password: ${ADMIN_PASSWORD}
 EOF
   chmod 600 /root/.credentials/portainer.txt
   
-  log "Portainer instalado com sucesso!"
+  log "Stack do Portainer implantado com sucesso!"
   log "Credenciais salvas em: /root/.credentials/portainer.txt" "$YELLOW"
   log "URL do Portainer: https://${FULL_DOMAIN}" "$YELLOW"
   log "Usuário: admin" "$YELLOW"
@@ -368,21 +388,20 @@ EOF
 check_services() {
   log "Verificando saúde dos serviços..."
   
-  # Verificar traefik
-  if ! docker service ls | grep -q "traefik"; then
-    log "Serviço Traefik não está em execução!" "$RED"
+  # Verificar se os stacks estão em execução
+  if ! docker stack ls | grep -q "traefik"; then
+    log "Stack Traefik não está em execução!" "$RED"
     return 1
   fi
   
-  # Verificar portainer
-  if ! docker service ls | grep -q "portainer"; then
-    log "Serviço Portainer não está em execução!" "$RED"
+  if ! docker stack ls | grep -q "portainer"; then
+    log "Stack Portainer não está em execução!" "$RED"
     return 1
   fi
   
   # Verificar status de execução dos serviços
-  local traefik_replicas=$(docker service ls --filter "name=traefik" --format "{{.Replicas}}")
-  local portainer_replicas=$(docker service ls --filter "name=portainer" --format "{{.Replicas}}")
+  local traefik_replicas=$(docker service ls --filter "name=traefik_traefik" --format "{{.Replicas}}")
+  local portainer_replicas=$(docker service ls --filter "name=portainer_portainer" --format "{{.Replicas}}")
   
   if [[ "$traefik_replicas" != *"1/1"* ]]; then
     log "Serviço Traefik não está saudável: $traefik_replicas" "$RED"
@@ -428,13 +447,13 @@ troubleshoot_services() {
   log "Limpando recursos Docker não utilizados..."
   docker system prune -f
   
-  # Verificar logs de erro do Traefik
+  # Verificar logs do Traefik
   log "Verificando logs do Traefik..."
-  docker service logs --tail 20 traefik 2>&1 | grep -i "error" || true
+  docker service logs --tail 20 traefik_traefik 2>&1 | grep -i "error" || true
   
-  # Verificar logs de erro do Portainer
+  # Verificar logs do Portainer
   log "Verificando logs do Portainer..."
-  docker service logs --tail 20 portainer 2>&1 | grep -i "error" || true
+  docker service logs --tail 20 portainer_portainer 2>&1 | grep -i "error" || true
   
   # Verificar configurações de rede
   log "Verificando configurações de rede..."
@@ -451,27 +470,27 @@ troubleshoot_services() {
     chmod 600 /opt/traefik/certificates/acme.json
   fi
   
-  # Reiniciar serviços com problemas
+  # Reiniciar stacks com problemas
   local restart_needed=false
   
-  if ! docker service ls | grep -q "traefik" || [[ "$(docker service ls --filter "name=traefik" --format "{{.Replicas}}")" != *"1/1"* ]]; then
-    log "Reiniciando serviço Traefik..." "$YELLOW"
-    docker service rm traefik || true
+  if ! docker stack ls | grep -q "traefik" || [[ "$(docker service ls --filter "name=traefik_traefik" --format "{{.Replicas}}")" != *"1/1"* ]]; then
+    log "Reiniciando stack do Traefik..." "$YELLOW"
+    docker stack rm traefik || true
     sleep 10
     install_traefik
     restart_needed=true
   fi
   
-  if ! docker service ls | grep -q "portainer" || [[ "$(docker service ls --filter "name=portainer" --format "{{.Replicas}}")" != *"1/1"* ]]; then
-    log "Reiniciando serviço Portainer..." "$YELLOW"
-    docker service rm portainer || true
+  if ! docker stack ls | grep -q "portainer" || [[ "$(docker service ls --filter "name=portainer_portainer" --format "{{.Replicas}}")" != *"1/1"* ]]; then
+    log "Reiniciando stack do Portainer..." "$YELLOW"
+    docker stack rm portainer || true
     sleep 10
     install_portainer
     restart_needed=true
   fi
   
   if [ "$restart_needed" = true ]; then
-    log "Serviços reiniciados. Verificando novamente em 30 segundos..." "$YELLOW"
+    log "Stacks reiniciados. Verificando novamente em 30 segundos..." "$YELLOW"
     sleep 30
     check_services
   else
