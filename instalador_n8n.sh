@@ -158,7 +158,7 @@ services:
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres${SUFFIX}
+      - DB_POSTGRESDB_HOST=${PG_STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
@@ -189,7 +189,7 @@ services:
       - N8N_NODE_PATH=/home/node/.n8n/nodes
 
       # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis${SUFFIX}
+      - QUEUE_BULL_REDIS_HOST=${REDIS_STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_DB=2
       - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
@@ -228,7 +228,44 @@ services:
         - traefik.http.routers.n8n_editor${SUFFIX}.tls.certresolver=letsencrypt
         - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.server.port=5678
 
-## --------------------------- n8n Webhook --------------------------- ##
+## --------------------------- n8n Webhook URL: https://${N8N_WEBHOOK_DOMAIN}
+Encryption Key: ${N8N_ENCRYPTION_KEY}
+Postgres Password: ${POSTGRES_PASSWORD}
+Database: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/n8n_queue${SUFFIX}
+EOF
+    chmod 600 "${CREDENTIALS_DIR}/n8n${SUFFIX}.txt"
+    echo -e "${VERDE}Credenciais do n8n salvas em ${CREDENTIALS_DIR}/n8n${SUFFIX}.txt${RESET}"
+else
+    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
+fi
+
+# Criar um objeto JSON de saída para integração com outros sistemas
+cat << EOF > /tmp/n8n${SUFFIX}_output.json
+{
+  "editorUrl": "https://${N8N_EDITOR_DOMAIN}",
+  "webhookUrl": "https://${N8N_WEBHOOK_DOMAIN}",
+  "encryptionKey": "${N8N_ENCRYPTION_KEY}",
+  "postgresPassword": "${POSTGRES_PASSWORD}",
+  "n8nStackName": "${N8N_STACK_NAME}",
+  "redisStackName": "${REDIS_STACK_NAME}",
+  "postgresStackName": "${PG_STACK_NAME}",
+  "databaseUri": "postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/n8n_queue${SUFFIX}"
+}
+EOF
+
+echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/n8n${SUFFIX}_output.json${RESET}"
+
+echo "---------------------------------------------"
+echo -e "${VERDE}[ n8n - INSTALAÇÃO COMPLETA ]${RESET}"
+echo -e "${VERDE}Editor URL:${RESET} https://${N8N_EDITOR_DOMAIN}"
+echo -e "${VERDE}Webhook URL:${RESET} https://${N8N_WEBHOOK_DOMAIN}"
+echo -e "${VERDE}Encryption Key:${RESET} ${N8N_ENCRYPTION_KEY}"
+echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
+echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${N8N_STACK_NAME}${RESET}"
+echo -e "${VERDE}Acesse seu n8n através do endereço:${RESET} https://${N8N_EDITOR_DOMAIN}"
+echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}" --------------------------- ##
 
   n8n_webhook:
     image: n8nio/n8n:latest
@@ -239,7 +276,7 @@ services:
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres${SUFFIX}
+      - DB_POSTGRESDB_HOST=${PG_STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
@@ -270,7 +307,7 @@ services:
       - N8N_NODE_PATH=/home/node/.n8n/nodes
 
       # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis${SUFFIX}
+      - QUEUE_BULL_REDIS_HOST=${REDIS_STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_DB=2
       - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
@@ -320,7 +357,7 @@ services:
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres${SUFFIX}
+      - DB_POSTGRESDB_HOST=${PG_STACK_NAME}_postgres
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
@@ -351,7 +388,7 @@ services:
       - N8N_NODE_PATH=/home/node/.n8n/nodes
 
       # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis${SUFFIX}
+      - QUEUE_BULL_REDIS_HOST=${REDIS_STACK_NAME}_redis
       - QUEUE_BULL_REDIS_PORT=6379
       - QUEUE_BULL_REDIS_DB=2
       - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
@@ -648,41 +685,4 @@ if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
     cat > "${CREDENTIALS_DIR}/n8n${SUFFIX}.txt" << EOF
 n8n Information
 Editor URL: https://${N8N_EDITOR_DOMAIN}
-Webhook URL: https://${N8N_WEBHOOK_DOMAIN}
-Encryption Key: ${N8N_ENCRYPTION_KEY}
-Postgres Password: ${POSTGRES_PASSWORD}
-Database: postgresql://postgres:${POSTGRES_PASSWORD}@postgres${SUFFIX}:5432/n8n_queue${SUFFIX}
-EOF
-    chmod 600 "${CREDENTIALS_DIR}/n8n${SUFFIX}.txt"
-    echo -e "${VERDE}Credenciais do n8n salvas em ${CREDENTIALS_DIR}/n8n${SUFFIX}.txt${RESET}"
-else
-    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
-fi
-
-# Criar um objeto JSON de saída para integração com outros sistemas
-cat << EOF > /tmp/n8n${SUFFIX}_output.json
-{
-  "editorUrl": "https://${N8N_EDITOR_DOMAIN}",
-  "webhookUrl": "https://${N8N_WEBHOOK_DOMAIN}",
-  "encryptionKey": "${N8N_ENCRYPTION_KEY}",
-  "postgresPassword": "${POSTGRES_PASSWORD}",
-  "n8nStackName": "${N8N_STACK_NAME}",
-  "redisStackName": "${REDIS_STACK_NAME}",
-  "postgresStackName": "${PG_STACK_NAME}",
-  "databaseUri": "postgresql://postgres:${POSTGRES_PASSWORD}@postgres${SUFFIX}:5432/n8n_queue${SUFFIX}"
-}
-EOF
-
-echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/n8n${SUFFIX}_output.json${RESET}"
-
-echo "---------------------------------------------"
-echo -e "${VERDE}[ n8n - INSTALAÇÃO COMPLETA ]${RESET}"
-echo -e "${VERDE}Editor URL:${RESET} https://${N8N_EDITOR_DOMAIN}"
-echo -e "${VERDE}Webhook URL:${RESET} https://${N8N_WEBHOOK_DOMAIN}"
-echo -e "${VERDE}Encryption Key:${RESET} ${N8N_ENCRYPTION_KEY}"
-echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
-echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
-echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
-echo -e "  - ${BEGE}${N8N_STACK_NAME}${RESET}"
-echo -e "${VERDE}Acesse seu n8n através do endereço:${RESET} https://${N8N_EDITOR_DOMAIN}"
-echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"parallelism: 1
+Webhook
