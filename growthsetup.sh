@@ -1,6 +1,6 @@
 #!/bin/bash
 # Script para configuração de Docker Swarm, Portainer e Traefik
-# Versão: 6.0 - Com Portainer standalone e senha que funciona
+# Versão: 7.0 - Solução final para o problema de login
 # Data: 27/03/2025
 
 # Cores para melhor visualização
@@ -158,12 +158,10 @@ init_swarm() {
     log "Volume 'volume_swarm_certificates' já existe." "$YELLOW"
   fi
   
-  if ! docker volume ls | grep -q "portainer_data"; then
-    docker volume create --name portainer_data || handle_error "Falha ao criar volume portainer_data" "criação de volume"
-    log "Volume 'portainer_data' criado com sucesso!"
-  else
-    log "Volume 'portainer_data' já existe." "$YELLOW"
-  fi
+  # Remover e recriar volume do Portainer para garantir configuração limpa
+  docker volume rm -f portainer_data >/dev/null 2>&1 || true
+  docker volume create --name portainer_data || handle_error "Falha ao criar volume portainer_data" "criação de volume"
+  log "Volume 'portainer_data' criado com sucesso!"
 }
 
 # Verificar configuração de DNS
@@ -287,22 +285,16 @@ EOF
   log "Stack do Traefik implantado com sucesso!"
 }
 
-# Pré-configurar senha para o Portainer
-setup_portainer_password() {
-  # Gerar uma senha aleatória
-  ADMIN_PASSWORD=$(openssl rand -base64 12)
-  
-  # Gerar hash da senha para o Portainer
-  ADMIN_PASSWORD_HASH=$(docker run --rm httpd:2.4-alpine htpasswd -nbB admin "$ADMIN_PASSWORD" | cut -d ":" -f 2)
-  
-  # Tratar o hash para funcionar no docker-compose
-  ADMIN_PASSWORD_HASH=$(echo "$ADMIN_PASSWORD_HASH" | sed 's/\$/\$\$/g')
+# Gerar senha sugerida para o Portainer
+generate_suggested_password() {
+  # Gerar uma senha aleatória simples (letras e números apenas para evitar problemas)
+  ADMIN_PASSWORD=$(openssl rand -base64 8 | tr -dc 'a-zA-Z0-9' | head -c 12)
   
   # Criar diretório para credenciais
   mkdir -p /root/.credentials
   chmod 700 /root/.credentials
   
-  # Salvar a senha em um arquivo
+  # Salvar a senha sugerida em um arquivo
   echo "${ADMIN_PASSWORD}" > /root/.credentials/portainer_password.txt
   chmod 600 /root/.credentials/portainer_password.txt
   
@@ -311,11 +303,12 @@ setup_portainer_password() {
 Portainer Admin Credentials
 URL: https://${PORTAINER_DOMAIN}
 Username: admin
-Password: ${ADMIN_PASSWORD}
+Password sugerida: ${ADMIN_PASSWORD}
+IMPORTANTE: Use esta senha no primeiro acesso ao definir a conta admin.
 EOF
   chmod 600 /root/.credentials/portainer.txt
   
-  log "Senha do Portainer gerada: ${ADMIN_PASSWORD}" "$YELLOW"
+  log "Senha sugerida para o Portainer: ${ADMIN_PASSWORD}" "$YELLOW"
   log "Credenciais salvas em /root/.credentials/portainer.txt" "$YELLOW"
 }
 
@@ -323,8 +316,8 @@ EOF
 install_portainer() {
   log "Instalando Portainer com domínio: ${PORTAINER_DOMAIN}..."
   
-  # Configurar a senha do Portainer
-  setup_portainer_password
+  # Gerar senha sugerida
+  generate_suggested_password
   
   # Remover instalação anterior se existir
   docker stack rm portainer || true
@@ -335,13 +328,12 @@ install_portainer() {
   # Criar diretório para stack file
   mkdir -p /opt/stacks/portainer
   
-  # Criar compose file para o Portainer (modo standalone)
+  # Criar compose file para o Portainer (sem definir senha para garantir que funcione)
   cat > /opt/stacks/portainer/docker-compose.yml << EOF
 version: "3.7"
 services:
   portainer:
-    image: portainer/portainer-ce:latest
-    command: --admin-password='${ADMIN_PASSWORD_HASH}'
+    image: portainer/portainer-ce:2.19.0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
@@ -378,9 +370,8 @@ EOF
   
   log "Stack do Portainer implantado com sucesso!"
   log "URL do Portainer: https://${PORTAINER_DOMAIN}" "$YELLOW"
-  log "Usuário: admin" "$YELLOW"
-  log "Senha: $(cat /root/.credentials/portainer_password.txt)" "$YELLOW"
-  log "Credenciais salvas em: /root/.credentials/portainer.txt" "$YELLOW"
+  log "IMPORTANTE: No primeiro acesso, você precisará definir uma senha para o admin" "$YELLOW"
+  log "Senha sugerida (salva em /root/.credentials/portainer.txt): $(cat /root/.credentials/portainer_password.txt)" "$YELLOW"
 }
 
 # Verificar saúde dos serviços
@@ -463,12 +454,17 @@ troubleshoot_services() {
   
   # Verificar volumes
   log "Verificando volumes..."
-  for vol in "volume_swarm_shared" "volume_swarm_certificates" "portainer_data"; do
+  for vol in "volume_swarm_shared" "volume_swarm_certificates"; do
     if ! docker volume ls | grep -q "$vol"; then
       log "Volume $vol não existe. Criando..." "$RED"
       docker volume create --name $vol
     fi
   done
+  
+  # Recriar o volume do Portainer para garantir uma configuração limpa
+  log "Recriando volume do Portainer para garantir configuração limpa..."
+  docker volume rm -f portainer_data >/dev/null 2>&1 || true
+  docker volume create --name portainer_data
   
   # Reiniciar stacks com problemas
   local restart_needed=false
@@ -527,9 +523,8 @@ EOF
   if check_services; then
     log "Configuração concluída com sucesso!" "$GREEN"
     log "Portainer está disponível em: https://${PORTAINER_DOMAIN}" "$GREEN"
-    log "Credenciais do Portainer:" "$GREEN"
-    log "Usuário: admin" "$GREEN"
-    log "Senha: $(cat /root/.credentials/portainer_password.txt)" "$GREEN"
+    log "IMPORTANTE: No primeiro acesso, você precisará definir uma senha para o admin" "$YELLOW"
+    log "Senha sugerida: $(cat /root/.credentials/portainer_password.txt)" "$GREEN"
     log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
   else
     log "Alguns serviços não estão funcionando corretamente." "$RED"
@@ -540,9 +535,8 @@ EOF
       log "Todos os problemas foram resolvidos!" "$GREEN"
       log "Configuração concluída com sucesso!" "$GREEN"
       log "Portainer está disponível em: https://${PORTAINER_DOMAIN}" "$GREEN"
-      log "Credenciais do Portainer:" "$GREEN"
-      log "Usuário: admin" "$GREEN"
-      log "Senha: $(cat /root/.credentials/portainer_password.txt)" "$GREEN"
+      log "IMPORTANTE: No primeiro acesso, você precisará definir uma senha para o admin" "$YELLOW"
+      log "Senha sugerida: $(cat /root/.credentials/portainer_password.txt)" "$GREEN"
       log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
     else
       log "Ainda existem problemas com os serviços." "$RED"
