@@ -61,7 +61,8 @@ docker volume create redis_data${SUFFIX} 2>/dev/null || echo "Volume redis_data$
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 docker network inspect GrowthNet >/dev/null 2>&1 || {
     echo -e "${VERDE}Criando rede GrowthNet...${RESET}"
-    docker network create --driver overlay GrowthNet
+    # Criar a rede como attachable para permitir conexão direta para testes
+    docker network create --driver overlay --attachable GrowthNet
 }
 
 # Criar arquivo docker-compose para a stack Redis
@@ -69,7 +70,7 @@ echo -e "${VERDE}Criando arquivo docker-compose para a stack Redis...${RESET}"
 cat > "${REDIS_STACK_NAME}.yaml" <<EOL
 version: '3.7'
 services:
-  redis${SUFFIX}:
+  redis:
     image: redis:latest
     command: redis-server --appendonly yes
     volumes:
@@ -105,7 +106,7 @@ echo -e "${VERDE}Criando arquivo docker-compose para a stack PostgreSQL...${RESE
 cat > "${PG_STACK_NAME}.yaml" <<EOL
 version: '3.7'
 services:
-  postgres${SUFFIX}:
+  postgres:
     image: postgres:13
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -173,6 +174,8 @@ services:
       - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
       - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
       - N8N_PROTOCOL=https
+      - N8N_PORT=5678
+      - NODE_BASE_URL=https://${N8N_EDITOR_DOMAIN}
 
       # Modo do Node
       - NODE_ENV=production
@@ -218,13 +221,16 @@ services:
         max_attempts: 3
       labels:
         - traefik.enable=true
-        - traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)
+        - traefik.enable=true
+        - traefik.docker.network=GrowthNet
+        - traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(`${N8N_EDITOR_DOMAIN}`)
         - traefik.http.routers.n8n_editor${SUFFIX}.entrypoints=websecure
-        - traefik.http.routers.n8n_editor${SUFFIX}.priority=1
+        - traefik.http.routers.n8n_editor${SUFFIX}.tls=true
         - traefik.http.routers.n8n_editor${SUFFIX}.tls.certresolver=letsencrypt
-        - traefik.http.routers.n8n_editor${SUFFIX}.service=n8n_editor${SUFFIX}
         - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.server.port=5678
-        - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.passHostHeader=1
+        - traefik.http.middlewares.n8neditor${SUFFIX}-redirectscheme.redirectscheme.scheme=https
+        - traefik.http.middlewares.n8neditor${SUFFIX}-redirectscheme.redirectscheme.permanent=true
+        - traefik.http.routers.n8n_editor${SUFFIX}.middlewares=n8neditor${SUFFIX}-redirectscheme
 
 ## --------------------------- n8n Webhook --------------------------- ##
 
@@ -298,13 +304,12 @@ services:
         max_attempts: 3
       labels:
         - traefik.enable=true
-        - traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)
+        - traefik.docker.network=GrowthNet
+        - traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(`${N8N_WEBHOOK_DOMAIN}`)
         - traefik.http.routers.n8n_webhook${SUFFIX}.entrypoints=websecure
-        - traefik.http.routers.n8n_webhook${SUFFIX}.priority=1
+        - traefik.http.routers.n8n_webhook${SUFFIX}.tls=true
         - traefik.http.routers.n8n_webhook${SUFFIX}.tls.certresolver=letsencrypt
-        - traefik.http.routers.n8n_webhook${SUFFIX}.service=n8n_webhook${SUFFIX}
         - traefik.http.services.n8n_webhook${SUFFIX}.loadbalancer.server.port=5678
-        - traefik.http.services.n8n_webhook${SUFFIX}.loadbalancer.passHostHeader=1
 
 ## --------------------------- n8n Worker --------------------------- ##
 
@@ -535,6 +540,11 @@ process_stack() {
             sleep 3
         fi
     fi
+
+    # Para depuração - mostrar o conteúdo do arquivo YAML
+    echo -e "${VERDE}Conteúdo do arquivo ${yaml_file}:${RESET}"
+    cat "${yaml_file}"
+    echo
 
     # Criar arquivo temporário para capturar a saída de erro e a resposta
     erro_output=$(mktemp)
