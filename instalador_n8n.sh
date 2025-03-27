@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script para criar stack do n8n no Portainer
+# Script para criar stacks separadas para n8n no Portainer (n8n, Redis e PostgreSQL)
 # Uso: ./script.sh <portainer_url> <n8n_editor_domain> <n8n_webhook_domain> <portainer_password> [sufixo]
 # Exemplo: ./script.sh painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 cliente1
 
@@ -27,7 +27,9 @@ fi
 
 # Configurações adicionais
 PORTAINER_USER="admin"              # Usuário do Portainer
-N8N_STACK_NAME="n8n${SUFFIX}"       # Nome da stack
+N8N_STACK_NAME="n8n${SUFFIX}"       # Nome da stack n8n
+REDIS_STACK_NAME="redis${SUFFIX}"   # Nome da stack Redis
+PG_STACK_NAME="postgres${SUFFIX}"   # Nome da stack PostgreSQL
 
 # Cores para formatação
 AMARELO="\e[33m"
@@ -51,8 +53,10 @@ error_exit() {
 }
 
 # Criar volumes Docker necessários
-echo -e "${VERDE}Criando volumes Docker para o n8n...${RESET}"
+echo -e "${VERDE}Criando volumes Docker...${RESET}"
 docker volume create n8n_data${SUFFIX} 2>/dev/null || echo "Volume n8n_data${SUFFIX} já existe."
+docker volume create postgres_data${SUFFIX} 2>/dev/null || echo "Volume postgres_data${SUFFIX} já existe."
+docker volume create redis_data${SUFFIX} 2>/dev/null || echo "Volume redis_data${SUFFIX} já existe."
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 docker network inspect GrowthNet >/dev/null 2>&1 || {
@@ -60,21 +64,93 @@ docker network inspect GrowthNet >/dev/null 2>&1 || {
     docker network create --driver overlay GrowthNet
 }
 
+# Criar arquivo docker-compose para a stack Redis
+echo -e "${VERDE}Criando arquivo docker-compose para a stack Redis...${RESET}"
+cat > "${REDIS_STACK_NAME}.yaml" <<EOL
+version: '3.7'
+services:
+  redis${SUFFIX}:
+    image: redis:latest
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data${SUFFIX}:/data
+    networks:
+      - GrowthNet
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+
+volumes:
+  redis_data${SUFFIX}:
+    external: true
+
+networks:
+  GrowthNet:
+    external: true
+EOL
+
+# Criar arquivo docker-compose para a stack PostgreSQL
+echo -e "${VERDE}Criando arquivo docker-compose para a stack PostgreSQL...${RESET}"
+cat > "${PG_STACK_NAME}.yaml" <<EOL
+version: '3.7'
+services:
+  postgres${SUFFIX}:
+    image: postgres:13
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_USER=postgres
+    volumes:
+      - postgres_data${SUFFIX}:/var/lib/postgresql/data
+    networks:
+      - GrowthNet
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+
+volumes:
+  postgres_data${SUFFIX}:
+    external: true
+
+networks:
+  GrowthNet:
+    external: true
+EOL
+
 # Criar arquivo docker-compose para a stack n8n
 echo -e "${VERDE}Criando arquivo docker-compose para a stack n8n...${RESET}"
 cat > "${N8N_STACK_NAME}.yaml" <<EOL
 version: "3.7"
 services:
 
-## --------------------------- n8n Stack --------------------------- ##
+## --------------------------- n8n Editor --------------------------- ##
 
   n8n_editor${SUFFIX}:
     image: n8nio/n8n:latest
     command: start
-
     networks:
       - GrowthNet
-
     environment:
       - N8N_PAYLOAD_SIZE_MAX=64mb
       # Dados do postgres
@@ -116,7 +192,8 @@ services:
       # Timezone
       - GENERIC_TIMEZONE=America/Sao_Paulo
       - TZ=America/Sao_Paulo
-
+    volumes:
+      - n8n_data${SUFFIX}:/home/node/.n8n
     deploy:
       mode: replicated
       replicas: 1
@@ -127,6 +204,14 @@ services:
         limits:
           cpus: "1"
           memory: 1024M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
       labels:
         - traefik.enable=true
         - traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)
@@ -142,10 +227,8 @@ services:
   n8n_webhook${SUFFIX}:
     image: n8nio/n8n:latest
     command: webhook
-
     networks:
       - GrowthNet
-
     environment:
       - N8N_PAYLOAD_SIZE_MAX=64mb
       # Dados do postgres
@@ -187,7 +270,8 @@ services:
       # Timezone
       - GENERIC_TIMEZONE=America/Sao_Paulo
       - TZ=America/Sao_Paulo
-      
+    volumes:
+      - n8n_data${SUFFIX}:/home/node/.n8n      
     deploy:
       mode: replicated
       replicas: 1
@@ -198,6 +282,14 @@ services:
         limits:
           cpus: "1"
           memory: 1024M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
       labels:
         - traefik.enable=true
         - traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)
@@ -213,10 +305,8 @@ services:
   n8n_worker${SUFFIX}:
     image: n8nio/n8n:latest
     command: worker --concurrency=10
-
     networks:
       - GrowthNet
-
     environment:
       - N8N_PAYLOAD_SIZE_MAX=64mb
       # Dados do postgres
@@ -258,7 +348,8 @@ services:
       # Timezone
       - GENERIC_TIMEZONE=America/Sao_Paulo
       - TZ=America/Sao_Paulo
-      
+    volumes:
+      - n8n_data${SUFFIX}:/home/node/.n8n
     deploy:
       mode: replicated
       replicas: 1
@@ -269,60 +360,23 @@ services:
         limits:
           cpus: "1"
           memory: 1024M
-
-## --------------------------- PostgreSQL --------------------------- ##
-
-  postgres${SUFFIX}:
-    image: postgres:13
-    environment:
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_USER=postgres
-    volumes:
-      - postgres_data${SUFFIX}:/var/lib/postgresql/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-        - node.role == manager
-
-## --------------------------- Redis --------------------------- ##
-
-  redis${SUFFIX}:
-    image: redis:latest
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data${SUFFIX}:/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-        - node.role == manager
-
-## ---------------------------  --------------------------- ##
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
 
 volumes:
   n8n_data${SUFFIX}:
-    external: true
-  postgres_data${SUFFIX}:
-    external: true
-  redis_data${SUFFIX}:
     external: true
 
 networks:
   GrowthNet:
     external: true
 EOL
-
-# Criar volumes adicionais necessários
-echo -e "${VERDE}Criando volumes adicionais...${RESET}"
-docker volume create postgres_data${SUFFIX} 2>/dev/null || echo "Volume postgres_data${SUFFIX} já existe."
-docker volume create redis_data${SUFFIX} 2>/dev/null || echo "Volume redis_data${SUFFIX} já existe."
 
 # Verificar se jq está instalado
 if ! command -v jq &> /dev/null; then
@@ -428,9 +482,9 @@ fi
 
 echo -e "ID do Swarm: ${BEGE}${SWARM_ID}${RESET}"
 
-# Processar a criação ou atualização da stack n8n
+# Função para processar a criação ou atualização de uma stack
 process_stack() {
-    local stack_name="$N8N_STACK_NAME"
+    local stack_name=$1
     local yaml_file="${stack_name}.yaml"
     
     echo -e "${VERDE}Processando stack: ${BEGE}${stack_name}${RESET}"
@@ -543,9 +597,27 @@ process_stack() {
     rm -f "$erro_output" "$response_output"
 }
 
-# Implementar a stack do n8n
-echo -e "${VERDE}Iniciando deploy da stack n8n...${RESET}"
-process_stack
+# Implementar stacks na ordem correta: primeiro Redis e PostgreSQL, depois n8n
+echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
+
+# Processar Redis primeiro
+process_stack "$REDIS_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar Redis, mas continuando...${RESET}"
+fi
+
+# Processar PostgreSQL segundo
+process_stack "$PG_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar PostgreSQL, mas continuando...${RESET}"
+fi
+
+# Adicionar uma pausa para garantir que os serviços anteriores sejam inicializados
+echo -e "${VERDE}Aguardando 15 segundos para inicialização dos serviços Redis e PostgreSQL...${RESET}"
+sleep 15
+
+# Processar n8n por último (depende dos outros)
+process_stack "$N8N_STACK_NAME"
 if [ $? -ne 0 ]; then
     error_exit "Falha ao implementar a stack n8n."
 fi
@@ -569,14 +641,16 @@ else
     echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
 fi
 
-# Criar um objeto JSON de saída para o n8n
+# Criar um objeto JSON de saída para integração com outros sistemas
 cat << EOF > /tmp/n8n${SUFFIX}_output.json
 {
   "editorUrl": "https://${N8N_EDITOR_DOMAIN}",
   "webhookUrl": "https://${N8N_WEBHOOK_DOMAIN}",
   "encryptionKey": "${N8N_ENCRYPTION_KEY}",
   "postgresPassword": "${POSTGRES_PASSWORD}",
-  "stackName": "${N8N_STACK_NAME}",
+  "n8nStackName": "${N8N_STACK_NAME}",
+  "redisStackName": "${REDIS_STACK_NAME}",
+  "postgresStackName": "${PG_STACK_NAME}",
   "databaseUri": "postgresql://postgres:${POSTGRES_PASSWORD}@postgres${SUFFIX}:5432/n8n_queue${SUFFIX}"
 }
 EOF
@@ -588,6 +662,9 @@ echo -e "${VERDE}[ n8n - INSTALAÇÃO COMPLETA ]${RESET}"
 echo -e "${VERDE}Editor URL:${RESET} https://${N8N_EDITOR_DOMAIN}"
 echo -e "${VERDE}Webhook URL:${RESET} https://${N8N_WEBHOOK_DOMAIN}"
 echo -e "${VERDE}Encryption Key:${RESET} ${N8N_ENCRYPTION_KEY}"
-echo -e "${VERDE}Stack ${N8N_STACK_NAME} criada com sucesso via API do Portainer!${RESET}"
+echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
+echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${N8N_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu n8n através do endereço:${RESET} https://${N8N_EDITOR_DOMAIN}"
-echo -e "${VERDE}A stack está disponível e editável no Portainer.${RESET}"
+echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
