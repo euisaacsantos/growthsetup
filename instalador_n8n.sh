@@ -110,6 +110,8 @@ services:
     environment:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_USER=postgres
+      # Inicializa o banco de dados necessário para o n8n
+      - POSTGRES_DB=n8n_queue${SUFFIX}
     volumes:
       - postgres_data${SUFFIX}:/var/lib/postgresql/data
     networks:
@@ -152,7 +154,6 @@ services:
     networks:
       - GrowthNet
     environment:
-      - N8N_PAYLOAD_SIZE_MAX=64mb
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
@@ -160,6 +161,9 @@ services:
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+
+      # Payload size (valor maior para uploads)
+      - N8N_PAYLOAD_SIZE_MAX=67108864
 
       # Encryption Key
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -230,7 +234,6 @@ services:
     networks:
       - GrowthNet
     environment:
-      - N8N_PAYLOAD_SIZE_MAX=64mb
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
@@ -238,6 +241,9 @@ services:
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+
+      # Payload size (valor maior para uploads)
+      - N8N_PAYLOAD_SIZE_MAX=67108864
 
       # Encryption Key
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
@@ -308,7 +314,6 @@ services:
     networks:
       - GrowthNet
     environment:
-      - N8N_PAYLOAD_SIZE_MAX=64mb
       # Dados do postgres
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
@@ -316,6 +321,9 @@ services:
       - DB_POSTGRESDB_PORT=5432
       - DB_POSTGRESDB_USER=postgres
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+
+      # Payload size (valor maior para uploads)
+      - N8N_PAYLOAD_SIZE_MAX=67108864
 
       # Encryption Key
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
