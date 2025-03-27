@@ -1,785 +1,534 @@
 #!/bin/bash
-# Script para criar stacks separadas para n8n no Portainer (n8n, Redis e PostgreSQL)
-# Uso: ./script.sh <portainer_url> <n8n_editor_domain> <n8n_webhook_domain> <portainer_password> [sufixo]
-# Exemplo: ./script.sh painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 cliente1
+# Script para configuração de Docker Swarm, Portainer e Traefik com subdomínio personalizável
+# Versão: 2.0 - Com verificações de falhas e recursos de recuperação
+# Data: 26/03/2025
 
-# Verificar parâmetros obrigatórios
-if [ $# -lt 4 ]; then
-    echo "Uso: $0 <portainer_url> <n8n_editor_domain> <n8n_webhook_domain> <portainer_password> [sufixo]"
-    echo "Exemplo: $0 painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 cliente1"
-    exit 1
-fi
+# Cores para melhor visualização
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-# Capturar parâmetros da linha de comando
-PORTAINER_URL="https://$1"           # URL do Portainer
-N8N_EDITOR_DOMAIN="$2"               # Domínio para o editor n8n
-N8N_WEBHOOK_DOMAIN="$3"              # Domínio para webhook n8n
-PORTAINER_PASSWORD="$4"              # Senha do Portainer
+# Variáveis globais
+MAX_RETRIES=3
+RETRY_COUNT=0
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE="/var/log/swarm-setup.log"
 
-# Verificar se há sufixo (para múltiplas instâncias)
-if [ -n "$5" ]; then
-    SUFFIX="_$5"
-    echo "Instalando com sufixo: $SUFFIX"
-else
-    SUFFIX=""
-    echo "Instalando primeira instância (sem sufixo)"
-fi
-
-# Configurações adicionais
-PORTAINER_USER="admin"              # Usuário do Portainer
-N8N_STACK_NAME="n8n${SUFFIX}"       # Nome da stack n8n
-REDIS_STACK_NAME="redis${SUFFIX}"   # Nome da stack Redis
-PG_STACK_NAME="postgres${SUFFIX}"   # Nome da stack PostgreSQL
-
-# Cores para formatação
-AMARELO="\e[33m"
-VERDE="\e[32m"
-VERMELHO="\e[31m"
-RESET="\e[0m"
-BEGE="\e[97m"
-
-# Gerar uma chave de criptografia do n8n aleatória
-N8N_ENCRYPTION_KEY=$(openssl rand -hex 16)
-echo -e "${VERDE}Chave de criptografia do n8n gerada: ${RESET}${N8N_ENCRYPTION_KEY}"
-
-# Gerar uma senha do PostgreSQL aleatória
-POSTGRES_PASSWORD=$(openssl rand -hex 16)
-echo -e "${VERDE}Senha do PostgreSQL gerada: ${RESET}${POSTGRES_PASSWORD}"
-
-# Função para exibir erros e sair
-error_exit() {
-    echo -e "${VERMELHO}ERRO: $1${RESET}" >&2
-    exit 1
+# Função para exibir mensagens
+log() {
+  local msg="$1"
+  local color="${2:-$GREEN}"
+  local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  echo -e "${color}[${timestamp}] $msg${NC}" | tee -a "$LOG_FILE"
 }
 
-# Verificar a configuração do Traefik e corrigir permissões do acme.json
-check_traefik_config() {
-    echo -e "${VERDE}Verificando a configuração do Traefik...${RESET}"
-    
-    # Verificar se o Traefik está em execução
-    if ! docker service ls | grep -q "traefik"; then
-        echo -e "${AMARELO}AVISO: Não foi encontrado um serviço Traefik em execução.${RESET}"
-        echo -e "${AMARELO}Certifique-se de que o Traefik está corretamente instalado antes de prosseguir.${RESET}"
+# Função para tratamento de erros
+handle_error() {
+  local error_msg="$1"
+  local step="$2"
+  local exit_code="${3:-1}"
+  
+  log "ERRO durante $step: $error_msg" "$RED"
+  log "Verifique o log em $LOG_FILE para mais detalhes." "$RED"
+  
+  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+    RETRY_COUNT=$((RETRY_COUNT + 1))
+    log "Tentando novamente ($RETRY_COUNT/$MAX_RETRIES)..." "$YELLOW"
+    sleep 5
+    main
+  else
+    log "Número máximo de tentativas atingido. Deseja reinstalar o Ubuntu 20.04? (s/n)" "$YELLOW"
+    read -r choice
+    if [[ "$choice" =~ ^[Ss]$ ]]; then
+      reinstall_ubuntu
+    else
+      log "Instalação abortada." "$RED"
+      exit $exit_code
     fi
-    
-    # Verificar existência e permissões do arquivo acme.json
-    acme_files=(
-        "/etc/traefik/certificates/acme.json"
-        "/etc/traefik/letsencrypt/acme.json"
-        "/opt/traefik/certificates/acme.json"
-    )
-    
-    acme_fixed=false
-    for acme_file in "${acme_files[@]}"; do
-        if [ -f "$acme_file" ]; then
-            echo -e "${VERDE}Arquivo acme.json encontrado em: $acme_file${RESET}"
-            chmod 600 "$acme_file"
-            echo -e "${VERDE}Permissões corrigidas para 600${RESET}"
-            acme_fixed=true
-        fi
-    done
-    
-    if [ "$acme_fixed" = false ]; then
-        echo -e "${AMARELO}AVISO: Arquivo acme.json não encontrado nos caminhos padrão.${RESET}"
-        echo -e "${AMARELO}Procurando arquivo acme.json em todo o sistema...${RESET}"
-        
-        ACME_PATH=$(find / -name acme.json 2>/dev/null | head -1)
-        
-        if [ -n "$ACME_PATH" ]; then
-            echo -e "${VERDE}Arquivo acme.json encontrado em: $ACME_PATH${RESET}"
-            chmod 600 "$ACME_PATH"
-            echo -e "${VERDE}Permissões corrigidas para 600${RESET}"
-        else
-            echo -e "${AMARELO}AVISO: Arquivo acme.json não encontrado. Os certificados SSL podem não funcionar.${RESET}"
-            echo -e "${AMARELO}Tentando verificar o contêiner do Traefik...${RESET}"
-            
-            # Verificar contêiner do Traefik
-            TRAEFIK_CONTAINER=$(docker ps --filter name=traefik --format "{{.ID}}" | head -1)
-            if [ -n "$TRAEFIK_CONTAINER" ]; then
-                echo -e "${VERDE}Contêiner do Traefik encontrado: $TRAEFIK_CONTAINER${RESET}"
-                docker exec $TRAEFIK_CONTAINER mkdir -p /etc/traefik/certificates 2>/dev/null || true
-                docker exec $TRAEFIK_CONTAINER touch /etc/traefik/certificates/acme.json 2>/dev/null || true
-                docker exec $TRAEFIK_CONTAINER chmod 600 /etc/traefik/certificates/acme.json 2>/dev/null || true
-                echo -e "${VERDE}Arquivo acme.json criado no contêiner do Traefik${RESET}"
-            else
-                echo -e "${AMARELO}AVISO: Contêiner do Traefik não encontrado.${RESET}"
-            fi
-        fi
-    fi
-    
-    # Tentar reiniciar o Traefik para aplicar as alterações
-    TRAEFIK_SERVICE=$(docker service ls --filter name=traefik --format "{{.Name}}" | head -1)
-    if [ -n "$TRAEFIK_SERVICE" ]; then
-        echo -e "${VERDE}Atualizando o serviço do Traefik: $TRAEFIK_SERVICE${RESET}"
-        docker service update --force $TRAEFIK_SERVICE 2>/dev/null || true
-    fi
+  fi
 }
 
-# Criar volumes Docker necessários
-echo -e "${VERDE}Criando volumes Docker...${RESET}"
-
-# Definir nomes dos volumes
-N8N_VOLUME="n8n_data${SUFFIX}"
-PG_VOLUME="postgres_data${SUFFIX}"
-REDIS_VOLUME="redis_data${SUFFIX}"
-
-docker volume create $N8N_VOLUME 2>/dev/null || echo "Volume $N8N_VOLUME já existe."
-docker volume create $PG_VOLUME 2>/dev/null || echo "Volume $PG_VOLUME já existe."
-docker volume create $REDIS_VOLUME 2>/dev/null || echo "Volume $REDIS_VOLUME já existe."
-
-# Verificar se a rede GrowthNet existe, caso contrário, criar
-docker network inspect GrowthNet >/dev/null 2>&1 || {
-    echo -e "${VERDE}Criando rede GrowthNet...${RESET}"
-    # Criar a rede como attachable para permitir conexão direta para testes
-    docker network create --driver overlay --attachable GrowthNet
+# Definir tratamento de erro global
+throw() {
+  local message="$1"
+  log "$message" "$RED"
+  return 1
 }
 
-# Criar arquivo docker-compose para a stack Redis
-echo -e "${VERDE}Criando arquivo docker-compose para a stack Redis...${RESET}"
-cat > "${REDIS_STACK_NAME}.yaml" <<EOL
-version: '3.7'
-services:
-  redis:
-    image: redis:latest
-    command: ["redis-server", "--appendonly", "yes", "--port", "6379"]
-    volumes:
-      - ${REDIS_VOLUME}:/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      resources:
-        limits:
-          cpus: "1"
-          memory: 1024M
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-
-volumes:
-  ${REDIS_VOLUME}:
-    external: true
-
-networks:
-  GrowthNet:
-    external: true
-EOL
-
-# Criar arquivo docker-compose para a stack PostgreSQL
-echo -e "${VERDE}Criando arquivo docker-compose para a stack PostgreSQL...${RESET}"
-cat > "${PG_STACK_NAME}.yaml" <<EOL
-version: '3.7'
-services:
-  postgres:
-    image: postgres:14
-    environment:
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_USER=postgres
-      - POSTGRES_DB=n8n_queue${SUFFIX}
-      - PG_MAX_CONNECTIONS=500
-    volumes:
-      - ${PG_VOLUME}:/var/lib/postgresql/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-      resources:
-        limits:
-          cpus: "1"
-          memory: 1024M
-
-volumes:
-  ${PG_VOLUME}:
-    external: true
-
-networks:
-  GrowthNet:
-    external: true
-EOL
-
-# Criar arquivo docker-compose para a stack n8n
-echo -e "${VERDE}Criando arquivo docker-compose para a stack n8n...${RESET}"
-cat > "${N8N_STACK_NAME}.yaml" <<EOL
-version: "3.7"
-services:
-
-## --------------------------- n8n Editor --------------------------- ##
-
-  n8n_editor:
-    image: n8nio/n8n:latest
-    command: start
-    networks:
-      - GrowthNet
-    environment:
-      # Payload size com formato numérico correto
-      - N8N_PAYLOAD_SIZE_MAX=64000000
-
-      # Dados do postgres
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_USER=postgres
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-
-      # Encryption Key
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-
-      # Url do N8N
-      - N8N_HOST=${N8N_EDITOR_DOMAIN}
-      - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
-      - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
-      - N8N_PROTOCOL=https
-
-      # Modo do Node
-      - NODE_ENV=production
-
-      # Modo de execução
-      - EXECUTIONS_MODE=queue
-
-      # Community Nodes
-      - N8N_REINSTALL_MISSING_PACKAGES=true
-      - N8N_COMMUNITY_PACKAGES_ENABLED=true
-      - N8N_NODE_PATH=/home/node/.n8n/nodes
-
-      # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis
-      - QUEUE_BULL_REDIS_PORT=6379
-      - QUEUE_BULL_REDIS_DB=2
-      - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
-      - EXECUTIONS_DATA_PRUNE=true
-      - EXECUTIONS_DATA_MAX_AGE=48
-
-      # Timezone
-      - GENERIC_TIMEZONE=America/Sao_Paulo
-      - TZ=America/Sao_Paulo
-    volumes:
-      - ${N8N_VOLUME}:/home/node/.n8n
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      resources:
-        limits:
-          cpus: "1"
-          memory: 1024M
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-      labels:
-        - traefik.enable=true
-        - traefik.docker.network=GrowthNet
-        - "traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)"
-        - traefik.http.routers.n8n_editor${SUFFIX}.entrypoints=websecure
-        - traefik.http.routers.n8n_editor${SUFFIX}.tls=true
-        - traefik.http.routers.n8n_editor${SUFFIX}.tls.certresolver=letsencrypt
-        - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.server.port=5678
-
-## --------------------------- n8n Webhook --------------------------- ##
-
-  n8n_webhook:
-    image: n8nio/n8n:latest
-    command: webhook
-    networks:
-      - GrowthNet
-    environment:
-      # Payload size com formato numérico correto
-      - N8N_PAYLOAD_SIZE_MAX=64000000
-
-      # Dados do postgres
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_USER=postgres
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-
-      # Encryption Key
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-
-      # Url do N8N
-      - N8N_HOST=${N8N_EDITOR_DOMAIN}
-      - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
-      - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
-      - N8N_PROTOCOL=https
-
-      # Modo do Node
-      - NODE_ENV=production
-
-      # Modo de execução
-      - EXECUTIONS_MODE=queue
-
-      # Community Nodes
-      - N8N_REINSTALL_MISSING_PACKAGES=true
-      - N8N_COMMUNITY_PACKAGES_ENABLED=true
-      - N8N_NODE_PATH=/home/node/.n8n/nodes
-
-      # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis
-      - QUEUE_BULL_REDIS_PORT=6379
-      - QUEUE_BULL_REDIS_DB=2
-      - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
-      - EXECUTIONS_DATA_PRUNE=true
-      - EXECUTIONS_DATA_MAX_AGE=336
-
-      # Timezone
-      - GENERIC_TIMEZONE=America/Sao_Paulo
-      - TZ=America/Sao_Paulo
-    volumes:
-      - ${N8N_VOLUME}:/home/node/.n8n      
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      resources:
-        limits:
-          cpus: "1"
-          memory: 1024M
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-      labels:
-        - traefik.enable=true
-        - traefik.docker.network=GrowthNet
-        - "traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)"
-        - traefik.http.routers.n8n_webhook${SUFFIX}.entrypoints=websecure
-        - traefik.http.routers.n8n_webhook${SUFFIX}.tls=true
-        - traefik.http.routers.n8n_webhook${SUFFIX}.tls.certresolver=letsencrypt
-        - traefik.http.services.n8n_webhook${SUFFIX}.loadbalancer.server.port=5678
-
-## --------------------------- n8n Worker --------------------------- ##
-
-  n8n_worker:
-    image: n8nio/n8n:latest
-    command: worker --concurrency=10
-    networks:
-      - GrowthNet
-    environment:
-      # Payload size com formato numérico correto
-      - N8N_PAYLOAD_SIZE_MAX=64000000
-
-      # Dados do postgres
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_USER=postgres
-      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-
-      # Encryption Key
-      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-
-      # Url do N8N
-      - N8N_HOST=${N8N_EDITOR_DOMAIN}
-      - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
-      - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
-      - N8N_PROTOCOL=https
-
-      # Modo do Node
-      - NODE_ENV=production
-
-      # Modo de execução
-      - EXECUTIONS_MODE=queue
-
-      # Community Nodes
-      - N8N_REINSTALL_MISSING_PACKAGES=true
-      - N8N_COMMUNITY_PACKAGES_ENABLED=true
-      - N8N_NODE_PATH=/home/node/.n8n/nodes
-
-      # Dados do Redis
-      - QUEUE_BULL_REDIS_HOST=redis
-      - QUEUE_BULL_REDIS_PORT=6379
-      - QUEUE_BULL_REDIS_DB=2
-      - NODE_FUNCTION_ALLOW_EXTERNAL=moment,lodash,moment-with-locales
-      - EXECUTIONS_DATA_PRUNE=true
-      - EXECUTIONS_DATA_MAX_AGE=336
-
-      # Timezone
-      - GENERIC_TIMEZONE=America/Sao_Paulo
-      - TZ=America/Sao_Paulo
-    volumes:
-      - ${N8N_VOLUME}:/home/node/.n8n
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      resources:
-        limits:
-          cpus: "1"
-          memory: 1024M
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-
-volumes:
-  ${N8N_VOLUME}:
-    external: true
-
-networks:
-  GrowthNet:
-    external: true
-EOL
-
-# Verificar se jq está instalado
-if ! command -v jq &> /dev/null; then
-    echo -e "${VERDE}Instalando jq...${RESET}"
-    apt-get update && apt-get install -y jq || {
-        error_exit "Falha ao instalar jq. Necessário para processamento de JSON."
-    }
+# Verificar se está sendo executado como root
+if [ "$EUID" -ne 0 ]; then
+  log "Este script precisa ser executado como root." "$RED"
+  exit 1
 fi
 
-# Verificar e corrigir configuração do Traefik
-check_traefik_config
+# Criar arquivo de log
+touch "$LOG_FILE"
+chmod 644 "$LOG_FILE"
+log "Log iniciado em $LOG_FILE" "$BLUE"
 
-# Obter token JWT do Portainer
-echo -e "${VERDE}Autenticando no Portainer...${RESET}"
-echo -e "URL do Portainer: ${BEGE}${PORTAINER_URL}${RESET}"
-
-# Usar curl com a opção -k para ignorar verificação de certificado
-AUTH_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/auth" \
-    -H "Content-Type: application/json" \
-    -d "{\"username\":\"${PORTAINER_USER}\",\"password\":\"${PORTAINER_PASSWORD}\"}" \
-    -w "\n%{http_code}")
-
-HTTP_CODE=$(echo "$AUTH_RESPONSE" | tail -n1)
-AUTH_BODY=$(echo "$AUTH_RESPONSE" | sed '$d')
-
-echo -e "Código HTTP retornado: ${BEGE}${HTTP_CODE}${RESET}"
-
-if [ "$HTTP_CODE" -ne 200 ]; then
-    echo "Erro na autenticação. Resposta completa:"
-    echo "$AUTH_RESPONSE"
-    
-    # Tentar alternativa com HTTP em vez de HTTPS
-    PORTAINER_URL_HTTP=$(echo "$PORTAINER_URL" | sed 's/https:/http:/')
-    echo "Tentando alternativa com HTTP: ${PORTAINER_URL_HTTP}/api/auth"
-    
-    AUTH_RESPONSE=$(curl -s -X POST "${PORTAINER_URL_HTTP}/api/auth" \
-        -H "Content-Type: application/json" \
-        -d "{\"username\":\"${PORTAINER_USER}\",\"password\":\"${PORTAINER_PASSWORD}\"}" \
-        -w "\n%{http_code}")
-    
-    HTTP_CODE=$(echo "$AUTH_RESPONSE" | tail -n1)
-    AUTH_BODY=$(echo "$AUTH_RESPONSE" | sed '$d')
-    
-    echo "Código HTTP alternativo: ${HTTP_CODE}"
-    
-    if [ "$HTTP_CODE" -ne 200 ]; then
-        error_exit "Autenticação falhou. Verifique a URL, usuário e senha do Portainer."
-    else
-        echo "Conexão bem-sucedida usando HTTP. Continuando com HTTP..."
-        PORTAINER_URL="$PORTAINER_URL_HTTP"
-    fi
+# Verificar argumentos
+if [ "$#" -lt 1 ]; then
+  log "Uso: $0 <subdominio-portainer> [dominio-principal] [email]" "$RED"
+  log "Exemplo: $0 portainer exemplo.com admin@exemplo.com" "$YELLOW"
+  exit 1
 fi
 
-JWT_TOKEN=$(echo "$AUTH_BODY" | grep -o '"jwt":"[^"]*' | cut -d'"' -f4)
+PORTAINER_SUBDOMAIN="$1"
+DOMAIN="${2:-localhost}"
+EMAIL="${3:-admin@$DOMAIN}"
+FULL_DOMAIN="${PORTAINER_SUBDOMAIN}.${DOMAIN}"
 
-if [ -z "$JWT_TOKEN" ]; then
-    error_exit "Não foi possível extrair o token JWT da resposta: $AUTH_BODY"
-fi
+log "Configurando com Portainer em: ${FULL_DOMAIN}"
+log "Email para certificados SSL: ${EMAIL}"
 
-echo -e "${VERDE}Autenticação bem-sucedida. Token JWT obtido.${RESET}"
-
-# Listar endpoints disponíveis
-echo -e "${VERDE}Listando endpoints disponíveis...${RESET}"
-ENDPOINTS_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/endpoints" \
-    -H "Authorization: Bearer ${JWT_TOKEN}" \
-    -w "\n%{http_code}")
-
-HTTP_CODE=$(echo "$ENDPOINTS_RESPONSE" | tail -n1)
-ENDPOINTS_BODY=$(echo "$ENDPOINTS_RESPONSE" | sed '$d')
-
-if [ "$HTTP_CODE" -ne 200 ]; then
-    error_exit "Falha ao listar endpoints. Código HTTP: ${HTTP_CODE}, Resposta: ${ENDPOINTS_BODY}"
-fi
-
-echo -e "${VERDE}Endpoints disponíveis:${RESET}"
-ENDPOINTS_LIST=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*,"Name":"[^"]*' | sed 's/"Id":\([0-9]*\),"Name":"\([^"]*\)"/ID: \1, Nome: \2/')
-echo "$ENDPOINTS_LIST"
-
-# Selecionar automaticamente o primeiro endpoint disponível
-ENDPOINT_ID=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*' | head -1 | grep -o '[0-9]*')
-    
-if [ -z "$ENDPOINT_ID" ]; then
-    error_exit "Não foi possível determinar o ID do endpoint."
-else
-    echo -e "Usando o primeiro endpoint disponível (ID: ${BEGE}${ENDPOINT_ID}${RESET})"
-fi
-
-# Verificar se o endpoint está em Swarm mode
-echo -e "${VERDE}Verificando se o endpoint está em modo Swarm...${RESET}"
-SWARM_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/endpoints/${ENDPOINT_ID}/docker/swarm" \
-    -H "Authorization: Bearer ${JWT_TOKEN}" \
-    -w "\n%{http_code}")
-
-HTTP_CODE=$(echo "$SWARM_RESPONSE" | tail -n1)
-SWARM_BODY=$(echo "$SWARM_RESPONSE" | sed '$d')
-
-if [ "$HTTP_CODE" -ne 200 ]; then
-    error_exit "Falha ao obter informações do Swarm. Código HTTP: ${HTTP_CODE}, Resposta: ${SWARM_BODY}"
-fi
-
-SWARM_ID=$(echo "$SWARM_BODY" | grep -o '"ID":"[^"]*' | cut -d'"' -f4)
-
-if [ -z "$SWARM_ID" ]; then
-    error_exit "Não foi possível extrair o ID do Swarm. O endpoint selecionado está em modo Swarm?"
-fi
-
-echo -e "ID do Swarm: ${BEGE}${SWARM_ID}${RESET}"
-
-# Função para processar a criação ou atualização de uma stack
-process_stack() {
-    local stack_name=$1
-    local yaml_file="${stack_name}.yaml"
-    
-    echo -e "${VERDE}Processando stack: ${BEGE}${stack_name}${RESET}"
-    
-    # Verificar se a stack já existe
-    STACK_LIST_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/stacks" \
-        -H "Authorization: Bearer ${JWT_TOKEN}" \
-        -w "\n%{http_code}")
-
-    HTTP_CODE=$(echo "$STACK_LIST_RESPONSE" | tail -n1)
-    STACK_LIST_BODY=$(echo "$STACK_LIST_RESPONSE" | sed '$d')
-
-    if [ "$HTTP_CODE" -ne 200 ]; then
-        echo -e "${AMARELO}Aviso: Não foi possível verificar stacks existentes. Código HTTP: ${HTTP_CODE}${RESET}"
-        echo "Continuando mesmo assim..."
-    else
-        # Verificar se uma stack com o mesmo nome já existe
-        EXISTING_STACK_ID=$(echo "$STACK_LIST_BODY" | grep -o "\"Id\":[0-9]*,\"Name\":\"${stack_name}\"" | grep -o '"Id":[0-9]*' | grep -o '[0-9]*')
-        
-        if [ ! -z "$EXISTING_STACK_ID" ]; then
-            echo -e "${AMARELO}Uma stack com o nome '${stack_name}' já existe (ID: ${EXISTING_STACK_ID})${RESET}"
-            echo -e "${VERDE}Removendo a stack existente para recriá-la...${RESET}"
-            
-            # Remover a stack existente
-            DELETE_RESPONSE=$(curl -k -s -X DELETE "${PORTAINER_URL}/api/stacks/${EXISTING_STACK_ID}?endpointId=${ENDPOINT_ID}" \
-                -H "Authorization: Bearer ${JWT_TOKEN}" \
-                -w "\n%{http_code}")
-            
-            HTTP_CODE=$(echo "$DELETE_RESPONSE" | tail -n1)
-            DELETE_BODY=$(echo "$DELETE_RESPONSE" | sed '$d')
-            
-            if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 204 ]; then
-                echo -e "${AMARELO}Aviso: Não foi possível remover a stack existente. Código HTTP: ${HTTP_CODE}${RESET}"
-                echo "Continuando mesmo assim..."
-            else
-                echo -e "${VERDE}Stack existente removida com sucesso.${RESET}"
-            fi
-            
-            # Aguardar um momento para garantir que a stack foi removida
-            sleep 3
-        fi
-    fi
-
-    # Para depuração - mostrar o conteúdo do arquivo YAML
-    echo -e "${VERDE}Conteúdo do arquivo ${yaml_file}:${RESET}"
-    cat "${yaml_file}"
-    echo
-
-    # Criar arquivo temporário para capturar a saída de erro e a resposta
-    erro_output=$(mktemp)
-    response_output=$(mktemp)
-
-    # Enviar a stack usando o endpoint multipart do Portainer
-    echo -e "${VERDE}Enviando a stack ${stack_name} para o Portainer...${RESET}"
-    http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
-      -H "Authorization: Bearer ${JWT_TOKEN}" \
-      -F "Name=${stack_name}" \
-      -F "file=@$(pwd)/${yaml_file}" \
-      -F "SwarmID=${SWARM_ID}" \
-      -F "endpointId=${ENDPOINT_ID}" \
-      "${PORTAINER_URL}/api/stacks/create/swarm/file" 2> "$erro_output")
-
-    response_body=$(cat "$response_output")
-
-    if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-        # Verifica o conteúdo da resposta para garantir que o deploy foi bem-sucedido
-        if echo "$response_body" | grep -q "\"Id\""; then
-            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso!${RESET}"
-            return 0
-        else
-            echo -e "${VERMELHO}Erro, resposta inesperada do servidor ao tentar efetuar deploy da stack ${BEGE}${stack_name}${RESET}.${RESET}"
-            echo "Resposta do servidor: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
-        fi
-    else
-        echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
-        echo "Mensagem de erro: $(cat "$erro_output")"
-        echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
-        
-        # Tentar método alternativo se falhar
-        echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
-        # Tenta com outro endpoint do Portainer (método 2)
-        http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
-          -H "Authorization: Bearer ${JWT_TOKEN}" \
-          -H "Content-Type: multipart/form-data" \
-          -F "Name=${stack_name}" \
-          -F "file=@$(pwd)/${yaml_file}" \
-          -F "SwarmID=${SWARM_ID}" \
-          -F "endpointId=${ENDPOINT_ID}" \
-          "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
-        
-        response_body=$(cat "$response_output")
-        
-        if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
-            return 0
-        else
-            echo -e "${VERMELHO}Erro ao efetuar deploy pelo método alternativo. Resposta HTTP: ${http_code}${RESET}"
-            echo "Mensagem de erro: $(cat "$erro_output")"
-            echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
-            
-            # Último recurso - usar o Docker diretamente
-            echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
-            if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
-                echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
-                echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
-                return 0
-            else
-                echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
-                return 1
-            fi
-        fi
-    fi
-
-    # Remove os arquivos temporários
-    rm -f "$erro_output" "$response_output"
+# Função para reinstalar o Ubuntu 20.04
+reinstall_ubuntu() {
+  log "Iniciando reinstalação do Ubuntu 20.04..." "$YELLOW"
+  
+  # Aqui você pode adicionar comandos para salvar dados importantes antes da reinstalação
+  mkdir -p /backup
+  
+  if [ -d "/root/.credentials" ]; then
+    cp -r /root/.credentials /backup/
+  fi
+  
+  log "Em um ambiente de produção, este comando iniciaria uma reinstalação do sistema." "$YELLOW"
+  log "Como isso é complexo e específico para cada ambiente, você precisará implementar esta função de acordo com sua infraestrutura." "$YELLOW"
+  log "Após a reinstalação, execute este script novamente." "$YELLOW"
+  
+  exit 1
 }
 
-# Implementar stacks na ordem correta: primeiro Redis e PostgreSQL, depois n8n
-echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
+# Atualizar o sistema
+update_system() {
+  log "Atualizando o sistema..."
+  
+  # Configurar apt para modo não interativo
+  export DEBIAN_FRONTEND=noninteractive
+  
+  # Atualizar listas de pacotes
+  apt update
+  
+  # Realizar upgrade sem prompts, mantendo arquivos de configuração locais
+  apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y
+  
+  # Instalar pacotes necessários sem prompts
+  apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y \
+    curl wget apt-transport-https ca-certificates \
+    software-properties-common gnupg jq host || handle_error "Falha ao atualizar o sistema" "atualização do sistema"
+  
+  log "Sistema atualizado com sucesso!"
+}
 
-# Processar Redis primeiro
-process_stack "$REDIS_STACK_NAME"
-if [ $? -ne 0 ]; then
-    echo -e "${AMARELO}Aviso: Problemas ao implementar Redis, mas continuando...${RESET}"
-fi
+# Instalar Docker
+install_docker() {
+  log "Instalando Docker..."
+  
+  # Remover versões antigas do Docker, se existirem
+  apt remove -y docker docker-engine docker.io containerd runc || true
+  
+  # Adicionar a chave GPG oficial do Docker
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  
+  # Configurar o repositório estável do Docker
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  
+  # Instalar Docker Engine
+  apt update
+  apt install -y docker-ce docker-ce-cli containerd.io || handle_error "Falha ao instalar o Docker" "instalação do Docker"
+  
+  # Iniciar e habilitar o Docker
+  systemctl enable --now docker
+  
+  # Verificar instalação
+  docker --version || throw "Docker não foi instalado corretamente"
+  
+  log "Docker instalado com sucesso!"
+}
 
-# Processar PostgreSQL segundo
-process_stack "$PG_STACK_NAME"
-if [ $? -ne 0 ]; then
-    echo -e "${AMARELO}Aviso: Problemas ao implementar PostgreSQL, mas continuando...${RESET}"
-fi
-
-# Criar banco de dados explicitamente para garantir
-echo -e "${VERDE}Verificando se o banco de dados já existe e criando se necessário...${RESET}"
-# Aguardar um pouco para o PostgreSQL inicializar completamente
-sleep 5
-
-# Tentar encontrar o container do PostgreSQL
-PG_CONTAINER=$(docker ps --filter name=postgres${SUFFIX} --format "{{.ID}}" | head -n1)
-if [ -n "$PG_CONTAINER" ]; then
-    echo -e "${VERDE}Container do PostgreSQL encontrado: ${PG_CONTAINER}${RESET}"
+# Inicializar Docker Swarm
+init_swarm() {
+  log "Inicializando o Docker Swarm..."
+  
+  # Verificar se o Swarm já está inicializado
+  if docker info | grep -q "Swarm: active"; then
+    log "Docker Swarm já está ativo neste nó." "$YELLOW"
+  else
+    # Obter IP do servidor para o Swarm
+    SERVER_IP=$(hostname -I | awk '{print $1}')
     
-    # Verificar se o banco de dados já existe
-    DB_EXISTS=$(docker exec -i $PG_CONTAINER psql -U postgres -t -c "SELECT 1 FROM pg_database WHERE datname='n8n_queue${SUFFIX}';" 2>/dev/null)
+    # Iniciar o Docker Swarm
+    docker swarm init --advertise-addr "$SERVER_IP" || handle_error "Falha ao inicializar o Docker Swarm" "inicialização do Swarm"
     
-    if [ -z "$DB_EXISTS" ] || [[ "$DB_EXISTS" != *"1"* ]]; then
-        echo -e "${VERDE}Criando banco de dados n8n_queue${SUFFIX}...${RESET}"
-        docker exec -i $PG_CONTAINER psql -U postgres -c "CREATE DATABASE \"n8n_queue${SUFFIX}\";"
-        docker exec -i $PG_CONTAINER psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE \"n8n_queue${SUFFIX}\" TO postgres;"
-        echo -e "${VERDE}Banco de dados criado e privilégios concedidos.${RESET}"
-    else
-        echo -e "${VERDE}Banco de dados n8n_queue${SUFFIX} já existe.${RESET}"
+    log "Docker Swarm inicializado com sucesso!"
+  fi
+  
+  # Criar rede para os serviços
+  if ! docker network ls | grep -q "traefik-public"; then
+    docker network create --driver=overlay traefik-public || handle_error "Falha ao criar rede traefik-public" "criação de rede"
+    log "Rede 'traefik-public' criada com sucesso!"
+  else
+    log "Rede 'traefik-public' já existe." "$YELLOW"
+  fi
+}
+
+# Verificar configuração de DNS
+check_dns() {
+  log "Verificando configuração DNS para ${FULL_DOMAIN}..."
+  
+  # Registrar a tentativa de resolução
+  local dns_check=$(host ${FULL_DOMAIN} 2>&1 || true)
+  log "Resultado da verificação DNS: ${dns_check}" "$BLUE"
+  
+  if echo "$dns_check" | grep -q "NXDOMAIN" || echo "$dns_check" | grep -q "not found"; then
+    log "Aviso: Não foi possível resolver ${FULL_DOMAIN}." "$YELLOW"
+    log "Certifique-se de que o DNS está configurado corretamente apontando para o IP deste servidor." "$YELLOW"
+    log "Os certificados SSL não funcionarão até que o DNS esteja corretamente configurado." "$YELLOW"
+    
+    # Obter o IP do servidor
+    local server_ip=$(hostname -I | awk '{print $1}')
+    log "IP deste servidor: ${server_ip}" "$YELLOW"
+    log "Configure seu DNS para que ${FULL_DOMAIN} aponte para ${server_ip}" "$YELLOW"
+    
+    # Perguntar se deseja continuar
+    log "Deseja continuar mesmo assim? (s/n)" "$YELLOW"
+    read -r choice
+    if [[ ! "$choice" =~ ^[Ss]$ ]]; then
+      log "Instalação abortada pelo usuário." "$RED"
+      exit 1
     fi
-fi
+  else
+    log "DNS para ${FULL_DOMAIN} está configurado corretamente!" "$GREEN"
+  fi
+}
 
-# Adicionar uma pausa para garantir que os serviços anteriores sejam inicializados
-echo -e "${VERDE}Aguardando 15 segundos para inicialização dos serviços Redis e PostgreSQL...${RESET}"
-sleep 15
-
-# Processar n8n por último (depende dos outros)
-process_stack "$N8N_STACK_NAME"
-if [ $? -ne 0 ]; then
-    error_exit "Falha ao implementar a stack n8n."
-fi
-
-# Salvar credenciais
-CREDENTIALS_DIR="/root/.credentials"
-if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
-    chmod 700 "$CREDENTIALS_DIR"
+# Instalar e configurar Traefik
+install_traefik() {
+  log "Instalando Traefik..."
+  
+  # Remover instalação anterior se existir
+  docker service rm traefik || true
+  
+  # Esperar serviço ser removido
+  sleep 10
+  
+  # Criar diretórios para o Traefik
+  mkdir -p /opt/traefik/config
+  mkdir -p /opt/traefik/certificates
+  
+  # Verificar e garantir que o diretório existe
+  if [ ! -d "/opt/traefik/certificates" ]; then
+    log "Criando diretório para certificados..." "$YELLOW"
+    mkdir -p /opt/traefik/certificates
+  fi
+  
+  # Criar arquivo de configuração dinâmica do Traefik
+  cat > /opt/traefik/config/dynamic.yml << EOF
+http:
+  middlewares:
+    secure-headers:
+      headers:
+        sslRedirect: true
+        forceSTSHeader: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
     
-    cat > "${CREDENTIALS_DIR}/n8n${SUFFIX}.txt" << EOF
-n8n Information
-Editor URL: https://${N8N_EDITOR_DOMAIN}
-Webhook URL: https://${N8N_WEBHOOK_DOMAIN}
-Encryption Key: ${N8N_ENCRYPTION_KEY}
-Postgres Password: ${POSTGRES_PASSWORD}
-Database: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/n8n_queue${SUFFIX}
+    compress:
+      compress: {}
 EOF
-    chmod 600 "${CREDENTIALS_DIR}/n8n${SUFFIX}.txt"
-    echo -e "${VERDE}Credenciais do n8n salvas em ${CREDENTIALS_DIR}/n8n${SUFFIX}.txt${RESET}"
-else
-    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
-fi
+  
+  # Criar arquivo de configuração estática do Traefik
+  cat > /opt/traefik/traefik.yml << EOF
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
 
-# Criar um objeto JSON de saída para integração com outros sistemas
-cat << EOF > /tmp/n8n${SUFFIX}_output.json
-{
-  "editorUrl": "https://${N8N_EDITOR_DOMAIN}",
-  "webhookUrl": "https://${N8N_WEBHOOK_DOMAIN}",
-  "encryptionKey": "${N8N_ENCRYPTION_KEY}",
-  "postgresPassword": "${POSTGRES_PASSWORD}",
-  "n8nStackName": "${N8N_STACK_NAME}",
-  "redisStackName": "${REDIS_STACK_NAME}",
-  "postgresStackName": "${PG_STACK_NAME}",
-  "databaseUri": "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/n8n_queue${SUFFIX}"
-}
+log:
+  level: "INFO"
+
+api:
+  dashboard: true
+  insecure: false
+
+entryPoints:
+  web:
+    address: ":80"
+  
+  websecure:
+    address: ":443"
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${EMAIL}
+      storage: /etc/traefik/certificates/acme.json
+      httpChallenge:
+        entryPoint: web
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    swarmMode: true
+    watch: true
+    exposedByDefault: false
+    network: traefik-public
+  
+  file:
+    directory: /etc/traefik/config
+    watch: true
 EOF
+  
+  # Criar arquivo acme.json para certificados com as permissões corretas
+  touch /opt/traefik/certificates/acme.json
+  chmod 600 /opt/traefik/certificates/acme.json
+  
+  # Garantir as permissões corretas no diretório de certificados
+  chmod -R 755 /opt/traefik/certificates
+  
+  # Usar versão específica do Traefik para maior estabilidade
+  docker service create \
+    --name traefik \
+    --constraint=node.role==manager \
+    --publish 80:80 \
+    --publish 443:443 \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --mount type=bind,source=/opt/traefik/traefik.yml,target=/etc/traefik/traefik.yml \
+    --mount type=bind,source=/opt/traefik/config,target=/etc/traefik/config \
+    --mount type=bind,source=/opt/traefik/certificates,target=/etc/traefik/certificates \
+    --network traefik-public \
+    --label "traefik.enable=true" \
+    --label "traefik.http.routers.traefik-secure.entrypoints=websecure" \
+    --label "traefik.http.routers.traefik-secure.rule=Host(\`traefik.${DOMAIN}\`)" \
+    --label "traefik.http.routers.traefik-secure.tls=true" \
+    --label "traefik.http.routers.traefik-secure.service=api@internal" \
+    --label "traefik.http.routers.traefik-secure.middlewares=secure-headers@file" \
+    --label "traefik.http.services.traefik.loadbalancer.server.port=8080" \
+    traefik:v2.10.4 || handle_error "Falha ao criar serviço Traefik" "instalação do Traefik"
+  
+  log "Traefik instalado com sucesso!"
+}
 
-echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/n8n${SUFFIX}_output.json${RESET}"
+# Instalar e configurar Portainer
+install_portainer() {
+  log "Instalando Portainer com subdomínio: ${FULL_DOMAIN}..."
+  
+  # Remover instalação anterior se existir
+  docker service rm portainer || true
+  
+  # Esperar serviço ser removido
+  sleep 10
+  
+  # Gerar senha inicial para o admin
+  ADMIN_PASSWORD=$(openssl rand -base64 12)
+  ADMIN_PASSWORD_HASH=$(docker run --rm httpd:2.4-alpine htpasswd -nbB admin "$ADMIN_PASSWORD" | cut -d ":" -f 2)
+  
+  # Criar diretório para dados do Portainer
+  mkdir -p /opt/portainer/data
+  
+  # Instalar uma versão específica do Portainer para maior estabilidade
+  docker service create \
+    --name portainer \
+    --constraint=node.role==manager \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --mount type=bind,source=/opt/portainer/data,target=/data \
+    --network traefik-public \
+    --label "traefik.enable=true" \
+    --label "traefik.http.routers.portainer-secure.entrypoints=websecure" \
+    --label "traefik.http.routers.portainer-secure.rule=Host(\`${FULL_DOMAIN}\`)" \
+    --label "traefik.http.routers.portainer-secure.tls=true" \
+    --label "traefik.http.routers.portainer-secure.tls.certresolver=letsencrypt" \
+    --label "traefik.http.routers.portainer-secure.service=portainer" \
+    --label "traefik.http.services.portainer.loadbalancer.server.port=9000" \
+    --label "traefik.http.middlewares.portainer-secure.headers.sslredirect=true" \
+    portainer/portainer-ce:2.19.0 \
+    --admin-password="$ADMIN_PASSWORD_HASH" || handle_error "Falha ao criar serviço Portainer" "instalação do Portainer"
+  
+  # Salvar as credenciais em um arquivo seguro
+  mkdir -p /root/.credentials
+  chmod 700 /root/.credentials
+  cat > /root/.credentials/portainer.txt << EOF
+Portainer Admin Credentials
+URL: https://${FULL_DOMAIN}
+Username: admin
+Password: ${ADMIN_PASSWORD}
+EOF
+  chmod 600 /root/.credentials/portainer.txt
+  
+  log "Portainer instalado com sucesso!"
+  log "Credenciais salvas em: /root/.credentials/portainer.txt" "$YELLOW"
+  log "URL do Portainer: https://${FULL_DOMAIN}" "$YELLOW"
+  log "Usuário: admin" "$YELLOW"
+  log "Senha: ${ADMIN_PASSWORD}" "$YELLOW"
+}
 
-echo "---------------------------------------------"
-echo -e "${VERDE}[ n8n - INSTALAÇÃO COMPLETA ]${RESET}"
-echo -e "${VERDE}Editor URL:${RESET} https://${N8N_EDITOR_DOMAIN}"
-echo -e "${VERDE}Webhook URL:${RESET} https://${N8N_WEBHOOK_DOMAIN}"
-echo -e "${VERDE}Encryption Key:${RESET} ${N8N_ENCRYPTION_KEY}"
-echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
-echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
-echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
-echo -e "  - ${BEGE}${N8N_STACK_NAME}${RESET}"
-echo -e "${VERDE}Acesse seu n8n através do endereço:${RESET} https://${N8N_EDITOR_DOMAIN}"
-echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
+# Verificar saúde dos serviços
+check_services() {
+  log "Verificando saúde dos serviços..."
+  
+  # Verificar traefik
+  if ! docker service ls | grep -q "traefik"; then
+    log "Serviço Traefik não está em execução!" "$RED"
+    return 1
+  fi
+  
+  # Verificar portainer
+  if ! docker service ls | grep -q "portainer"; then
+    log "Serviço Portainer não está em execução!" "$RED"
+    return 1
+  fi
+  
+  # Verificar status de execução dos serviços
+  local traefik_replicas=$(docker service ls --filter "name=traefik" --format "{{.Replicas}}")
+  local portainer_replicas=$(docker service ls --filter "name=portainer" --format "{{.Replicas}}")
+  
+  if [[ "$traefik_replicas" != *"1/1"* ]]; then
+    log "Serviço Traefik não está saudável: $traefik_replicas" "$RED"
+    return 1
+  fi
+  
+  if [[ "$portainer_replicas" != *"1/1"* ]]; then
+    log "Serviço Portainer não está saudável: $portainer_replicas" "$RED"
+    return 1
+  fi
+  
+  log "Todos os serviços estão saudáveis!" "$GREEN"
+  return 0
+}
+
+# Função para fazer diagnóstico e correção automática
+troubleshoot_services() {
+  log "Iniciando diagnóstico de serviços..." "$BLUE"
+  
+  # Verificar sistema
+  log "Verificando recursos do sistema..."
+  local total_mem=$(free -m | awk '/^Mem:/{print $2}')
+  local used_mem=$(free -m | awk '/^Mem:/{print $3}')
+  local disk_usage=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
+  
+  if [ "$total_mem" -lt 2000 ]; then
+    log "Aviso: Memória total ($total_mem MB) pode ser insuficiente para o Docker Swarm" "$YELLOW"
+  fi
+  
+  if [ "$disk_usage" -gt 85 ]; then
+    log "Aviso: Uso de disco ($disk_usage%) está alto" "$YELLOW"
+  fi
+  
+  # Verificar Docker
+  log "Verificando status do Docker..."
+  if ! systemctl is-active --quiet docker; then
+    log "Docker não está rodando. Tentando reiniciar..." "$RED"
+    systemctl restart docker
+    sleep 5
+  fi
+  
+  # Limpar recursos não usados
+  log "Limpando recursos Docker não utilizados..."
+  docker system prune -f
+  
+  # Verificar logs de erro do Traefik
+  log "Verificando logs do Traefik..."
+  docker service logs --tail 20 traefik 2>&1 | grep -i "error" || true
+  
+  # Verificar logs de erro do Portainer
+  log "Verificando logs do Portainer..."
+  docker service logs --tail 20 portainer 2>&1 | grep -i "error" || true
+  
+  # Verificar configurações de rede
+  log "Verificando configurações de rede..."
+  if ! docker network inspect traefik-public >/dev/null 2>&1; then
+    log "Rede traefik-public não existe. Recriando..." "$RED"
+    docker network create --driver=overlay traefik-public
+  fi
+  
+  # Verificar configuração dos certificados
+  log "Verificando configuração de certificados..."
+  if [ ! -f "/opt/traefik/certificates/acme.json" ]; then
+    log "Arquivo acme.json não encontrado. Criando..." "$RED"
+    touch /opt/traefik/certificates/acme.json
+    chmod 600 /opt/traefik/certificates/acme.json
+  fi
+  
+  # Reiniciar serviços com problemas
+  local restart_needed=false
+  
+  if ! docker service ls | grep -q "traefik" || [[ "$(docker service ls --filter "name=traefik" --format "{{.Replicas}}")" != *"1/1"* ]]; then
+    log "Reiniciando serviço Traefik..." "$YELLOW"
+    docker service rm traefik || true
+    sleep 10
+    install_traefik
+    restart_needed=true
+  fi
+  
+  if ! docker service ls | grep -q "portainer" || [[ "$(docker service ls --filter "name=portainer" --format "{{.Replicas}}")" != *"1/1"* ]]; then
+    log "Reiniciando serviço Portainer..." "$YELLOW"
+    docker service rm portainer || true
+    sleep 10
+    install_portainer
+    restart_needed=true
+  fi
+  
+  if [ "$restart_needed" = true ]; then
+    log "Serviços reiniciados. Verificando novamente em 30 segundos..." "$YELLOW"
+    sleep 30
+    check_services
+  else
+    log "Diagnóstico concluído. Nenhuma ação adicional necessária." "$GREEN"
+  fi
+}
+
+# Função principal de execução
+main() {
+  log "Iniciando configuração do ambiente..."
+  
+  # Verificar se a configuração já foi concluída
+  if [ -f "/root/.credentials/portainer.txt" ] && check_services; then
+    log "Ambiente já parece estar configurado e funcionando." "$YELLOW"
+    log "Deseja reinstalar todos os serviços? (s/n)" "$YELLOW"
+    # Responder automaticamente "sim" para permitir execução sem intervenção
+    echo "s"
+  fi
+  
+  # Início da instalação
+  update_system
+  install_docker
+  init_swarm
+  # Auto-responder 's' para pergunta do check_dns
+  check_dns << EOF
+s
+EOF
+  install_traefik
+  install_portainer
+  
+  # Verificar se tudo está funcionando
+  if check_services; then
+    log "Configuração concluída com sucesso!" "$GREEN"
+    log "Portainer está disponível em: https://${FULL_DOMAIN}" "$GREEN"
+    log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+  else
+    log "Alguns serviços não estão funcionando corretamente." "$RED"
+    troubleshoot_services
+    
+    # Verificação final
+    if check_services; then
+      log "Todos os problemas foram resolvidos!" "$GREEN"
+      log "Configuração concluída com sucesso!" "$GREEN"
+      log "Portainer está disponível em: https://${FULL_DOMAIN}" "$GREEN"
+      log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+    else
+      log "Ainda existem problemas com os serviços." "$RED"
+      log "Verifique os logs e considere a opção de reinstalação ou entre em contato com o suporte." "$RED"
+      # Não abortar, responder automaticamente
+      log "Continuar mesmo assim? (s/n)" "$YELLOW"
+      echo "s"
+    fi
+  fi
+}
+
+# Captura de sinais para limpeza adequada
+trap 'log "Script interrompido pelo usuário. Limpando..."; exit 1' INT TERM
+
+# Executar a função principal
+main
