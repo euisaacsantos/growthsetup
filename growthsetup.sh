@@ -1,6 +1,6 @@
 #!/bin/bash
 # Script para configuração de Docker Swarm, Portainer e Traefik
-# Versão: 4.0 - Corrigido para senha automática do Portainer
+# Versão: 5.0 - Com arquitetura Agent e senha pré-configurada
 # Data: 27/03/2025
 
 # Cores para melhor visualização
@@ -287,9 +287,38 @@ EOF
   log "Stack do Traefik implantado com sucesso!"
 }
 
+# Pré-configurar senha para o Portainer
+setup_portainer_password() {
+  # Gerar uma senha aleatória
+  ADMIN_PASSWORD=$(openssl rand -base64 12)
+  
+  # Criar diretório para credenciais
+  mkdir -p /root/.credentials
+  chmod 700 /root/.credentials
+  
+  # Salvar a senha em um arquivo
+  echo "${ADMIN_PASSWORD}" > /root/.credentials/portainer_password.txt
+  chmod 600 /root/.credentials/portainer_password.txt
+  
+  # Salvar credenciais completas
+  cat > /root/.credentials/portainer.txt << EOF
+Portainer Admin Credentials
+URL: https://${PORTAINER_DOMAIN}
+Username: admin
+Password: ${ADMIN_PASSWORD}
+EOF
+  chmod 600 /root/.credentials/portainer.txt
+  
+  log "Senha do Portainer gerada: ${ADMIN_PASSWORD}" "$YELLOW"
+  log "Credenciais salvas em /root/.credentials/portainer.txt" "$YELLOW"
+}
+
 # Instalar e configurar Portainer usando docker-compose e stack
 install_portainer() {
   log "Instalando Portainer com domínio: ${PORTAINER_DOMAIN}..."
+  
+  # Configurar a senha do Portainer
+  setup_portainer_password
   
   # Remover instalação anterior se existir
   docker stack rm portainer || true
@@ -300,16 +329,25 @@ install_portainer() {
   # Criar diretório para stack file
   mkdir -p /opt/stacks/portainer
   
-  # Gerar senha aleatória para admin
-  ADMIN_PASSWORD=$(openssl rand -base64 12)
-  
-  # Usar a imagem standalone do Portainer (sem agent) para permitir definir senha
+  # Criar compose file para o Portainer
   cat > /opt/stacks/portainer/docker-compose.yml << EOF
 version: "3.7"
 services:
+  agent:
+    image: portainer/agent:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker/volumes:/var/lib/docker/volumes
+    networks:
+      - ${NETWORK_NAME}
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.platform.os == linux]
+
   portainer:
     image: portainer/portainer-ce:latest
-    command: --admin-password=\$\$2y\$05\$\$\$(docker run --rm httpd:2.4-alpine htpasswd -bnBC 10 "" "${ADMIN_PASSWORD}" | tr -d ':\n' | sed 's/\$\$/\$\$\$\$/g')
+    command: -H tcp://tasks.agent:9001 --tlsskipverify
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
@@ -344,22 +382,11 @@ EOF
   # Implantar o stack do Portainer
   docker stack deploy -c /opt/stacks/portainer/docker-compose.yml portainer || handle_error "Falha ao criar stack do Portainer" "implantação do Portainer"
   
-  # Salvar as credenciais em um arquivo seguro
-  mkdir -p /root/.credentials
-  chmod 700 /root/.credentials
-  cat > /root/.credentials/portainer.txt << EOF
-Portainer Admin Credentials
-URL: https://${PORTAINER_DOMAIN}
-Username: admin
-Password: ${ADMIN_PASSWORD}
-EOF
-  chmod 600 /root/.credentials/portainer.txt
-  
   log "Stack do Portainer implantado com sucesso!"
-  log "Credenciais salvas em: /root/.credentials/portainer.txt" "$YELLOW"
   log "URL do Portainer: https://${PORTAINER_DOMAIN}" "$YELLOW"
-  log "Usuário: admin" "$YELLOW"
-  log "Senha: ${ADMIN_PASSWORD}" "$YELLOW"
+  log "Aguarde o serviço iniciar completamente (pode levar alguns minutos)" "$YELLOW"
+  log "Em seguida, configure a senha manual no primeiro acesso" "$YELLOW"
+  log "Use a senha gerada: $(cat /root/.credentials/portainer_password.txt)" "$YELLOW"
 }
 
 # Verificar saúde dos serviços
@@ -380,6 +407,7 @@ check_services() {
   # Verificar status de execução dos serviços
   local traefik_replicas=$(docker service ls --filter "name=traefik_traefik" --format "{{.Replicas}}")
   local portainer_replicas=$(docker service ls --filter "name=portainer_portainer" --format "{{.Replicas}}")
+  local agent_status=$(docker service ls --filter "name=portainer_agent" --format "{{.Replicas}}")
   
   if [[ "$traefik_replicas" != *"1/1"* ]]; then
     log "Serviço Traefik não está saudável: $traefik_replicas" "$RED"
@@ -388,6 +416,13 @@ check_services() {
   
   if [[ "$portainer_replicas" != *"1/1"* ]]; then
     log "Serviço Portainer não está saudável: $portainer_replicas" "$RED"
+    return 1
+  fi
+  
+  # Verificar status do agent (deve ter uma réplica por nó)
+  local node_count=$(docker node ls | grep -c "Ready")
+  if [[ "$agent_status" != *"$node_count/$node_count"* ]]; then
+    log "Serviço Portainer Agent não está saudável: $agent_status (esperado $node_count/$node_count)" "$RED"
     return 1
   fi
   
@@ -506,9 +541,11 @@ EOF
   if check_services; then
     log "Configuração concluída com sucesso!" "$GREEN"
     log "Portainer está disponível em: https://${PORTAINER_DOMAIN}" "$GREEN"
-    log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+    log "Credenciais do Portainer:" "$GREEN"
     log "Usuário: admin" "$GREEN"
-    log "Senha: ${ADMIN_PASSWORD}" "$GREEN"
+    log "Senha (gerada aleatoriamente): $(cat /root/.credentials/portainer_password.txt)" "$GREEN"
+    log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+    log "*** IMPORTANTE: No primeiro acesso, use essa senha gerada para configurar sua conta admin ***" "$YELLOW"
   else
     log "Alguns serviços não estão funcionando corretamente." "$RED"
     troubleshoot_services
@@ -518,9 +555,11 @@ EOF
       log "Todos os problemas foram resolvidos!" "$GREEN"
       log "Configuração concluída com sucesso!" "$GREEN"
       log "Portainer está disponível em: https://${PORTAINER_DOMAIN}" "$GREEN"
-      log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+      log "Credenciais do Portainer:" "$GREEN"
       log "Usuário: admin" "$GREEN"
-      log "Senha: ${ADMIN_PASSWORD}" "$GREEN"
+      log "Senha (gerada aleatoriamente): $(cat /root/.credentials/portainer_password.txt)" "$GREEN"
+      log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+      log "*** IMPORTANTE: No primeiro acesso, use essa senha gerada para configurar sua conta admin ***" "$YELLOW"
     else
       log "Ainda existem problemas com os serviços." "$RED"
       log "Verifique os logs em /var/log/swarm-setup.log e /var/log/traefik/" "$RED"
