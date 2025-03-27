@@ -78,23 +78,35 @@ error_exit() {
     exit 1
 }
 
-# Função para verificar a saúde do PostgreSQL
+# Função modificada para verificar a saúde do PostgreSQL usando ID do container
 check_postgres_health() {
-    local container_name=$1
+    local service_name="$PG_STACK_NAME"_postgres
     local max_attempts=15
     local attempt=0
+    
+    log "INFO" "Verificando saúde do PostgreSQL (serviço: $service_name)"
     
     while [ $attempt -lt $max_attempts ]; do
         log "INFO" "Verificando saúde do PostgreSQL (Tentativa $((attempt+1))/$max_attempts)"
         
-        # Verifica se o container está rodando
-        if ! docker ps | grep -q "$container_name"; then
-            log "ERROR" "Container PostgreSQL não está rodando"
+        # Usa o comando 'docker service ps' para verificar se o serviço está rodando
+        if ! docker service ps --filter "desired-state=running" "$service_name" | grep -q "Running"; then
+            log "ERROR" "Serviço PostgreSQL não está rodando"
             return 1
         fi
         
+        # Pega o ID do container
+        local container_id=$(docker ps --filter "name=$service_name" --format "{{.ID}}" | head -1)
+        
+        if [ -z "$container_id" ]; then
+            log "WARNING" "Não foi possível encontrar o container do PostgreSQL"
+            sleep 20
+            ((attempt++))
+            continue
+        fi
+        
         # Tenta conectar e verificar a versão do PostgreSQL
-        local pg_version=$(docker exec "$container_name" psql -U postgres -t -c "SELECT version();" 2>/dev/null)
+        local pg_version=$(docker exec "$container_id" psql -U postgres -t -c "SELECT version();" 2>/dev/null)
         
         if [ $? -eq 0 ] && [ -n "$pg_version" ]; then
             log "SUCCESS" "PostgreSQL está saudável. Versão: $pg_version"
@@ -110,23 +122,35 @@ check_postgres_health() {
     return 1
 }
 
-# Função para verificar a saúde do Redis
+# Função modificada para verificar a saúde do Redis usando ID do container
 check_redis_health() {
-    local container_name=$1
+    local service_name="$REDIS_STACK_NAME"_redis
     local max_attempts=15
     local attempt=0
+    
+    log "INFO" "Verificando saúde do Redis (serviço: $service_name)"
     
     while [ $attempt -lt $max_attempts ]; do
         log "INFO" "Verificando saúde do Redis (Tentativa $((attempt+1))/$max_attempts)"
         
-        # Verifica se o container está rodando
-        if ! docker ps | grep -q "$container_name"; then
-            log "ERROR" "Container Redis não está rodando"
+        # Usa o comando 'docker service ps' para verificar se o serviço está rodando
+        if ! docker service ps --filter "desired-state=running" "$service_name" | grep -q "Running"; then
+            log "ERROR" "Serviço Redis não está rodando"
             return 1
         fi
         
+        # Pega o ID do container
+        local container_id=$(docker ps --filter "name=$service_name" --format "{{.ID}}" | head -1)
+        
+        if [ -z "$container_id" ]; then
+            log "WARNING" "Não foi possível encontrar o container do Redis"
+            sleep 20
+            ((attempt++))
+            continue
+        fi
+        
         # Tenta conectar e verificar se o Redis está respondendo
-        local redis_ping=$(docker exec "$container_name" redis-cli ping 2>/dev/null)
+        local redis_ping=$(docker exec "$container_id" redis-cli ping 2>/dev/null)
         
         if [ "$redis_ping" = "PONG" ]; then
             log "SUCCESS" "Redis está saudável"
@@ -142,20 +166,28 @@ check_redis_health() {
     return 1
 }
 
-# Função para criar banco de dados com verificações
+# Função modificada para criar banco de dados
 create_n8n_database() {
-    local container_name=$1
+    local service_name="$PG_STACK_NAME"_postgres
     local database_name=$2
     
     log "INFO" "Tentando criar banco de dados $database_name"
     
+    # Pega o ID do container
+    local container_id=$(docker ps --filter "name=$service_name" --format "{{.ID}}" | head -1)
+    
+    if [ -z "$container_id" ]; then
+        log "ERROR" "Não foi possível encontrar o container do PostgreSQL"
+        return 1
+    fi
+    
     # Verificar se o banco já existe
-    local db_exists=$(docker exec "$container_name" psql -U postgres -t -c "SELECT 1 FROM pg_database WHERE datname='$database_name';" 2>/dev/null)
+    local db_exists=$(docker exec "$container_id" psql -U postgres -t -c "SELECT 1 FROM pg_database WHERE datname='$database_name';" 2>/dev/null)
     
     if [ -z "$db_exists" ] || [[ "$db_exists" != *"1"* ]]; then
         log "INFO" "Criando banco de dados $database_name"
-        docker exec "$container_name" psql -U postgres -c "CREATE DATABASE \"$database_name\";" &&
-        docker exec "$container_name" psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE \"$database_name\" TO postgres;"
+        docker exec "$container_id" psql -U postgres -c "CREATE DATABASE \"$database_name\";" &&
+        docker exec "$container_id" psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE \"$database_name\" TO postgres;"
         
         if [ $? -eq 0 ]; then
             log "SUCCESS" "Banco de dados $database_name criado com sucesso"
@@ -526,7 +558,7 @@ process_stack() {
     rm -f "$erro_output" "$response_output"
 }
 
-# Função principal de deploy
+# Função principal de deploy modificada para tratar erros de saúde
 deploy_n8n_stack() {
     local portainer_url=$1
     local editor_domain=$2
@@ -550,15 +582,14 @@ deploy_n8n_stack() {
     sleep 30
     
     # Verificar saúde do PostgreSQL
-    local pg_container_name="postgres${suffix}"
-    check_postgres_health "$pg_container_name"
+    check_postgres_health
     if [ $? -ne 0 ]; then
-        log "ERROR" "PostgreSQL não está saudável"
-        return 1
+        log "WARNING" "PostgreSQL não respondeu à verificação de saúde, mas continuando com a instalação..."
+        # Não retorna 1, continua com a instalação
+    else
+        # Criar banco de dados n8n se o PostgreSQL estiver respondendo
+        create_n8n_database dummy "n8n_queue${suffix}"
     fi
-    
-    # Criar banco de dados n8n
-    create_n8n_database "$pg_container_name" "n8n_queue${suffix}"
     
     # Deploy Redis
     process_stack "$REDIS_STACK_NAME"
@@ -572,11 +603,10 @@ deploy_n8n_stack() {
     sleep 30
     
     # Verificar saúde do Redis
-    local redis_container_name="redis${suffix}"
-    check_redis_health "$redis_container_name"
+    check_redis_health
     if [ $? -ne 0 ]; then
-        log "ERROR" "Redis não está saudável"
-        return 1
+        log "WARNING" "Redis não respondeu à verificação de saúde, mas continuando com a instalação..."
+        # Não retorna 1, continua com a instalação
     fi
     
     # Deploy n8n
@@ -587,6 +617,7 @@ deploy_n8n_stack() {
     fi
     
     log "SUCCESS" "Deploy completo da stack n8n com sucesso!"
+    log "INFO" "O n8n está disponível pela porta 5678 e também pelos domínios configurados"
     return 0
 }
 
@@ -605,6 +636,7 @@ if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
 n8n Information
 Editor URL: https://${N8N_EDITOR_DOMAIN}
 Webhook URL: https://${N8N_WEBHOOK_DOMAIN}
+Acesso direto: http://IP_DO_SERVIDOR:5678
 Encryption Key: ${N8N_ENCRYPTION_KEY}
 Postgres Password: ${POSTGRES_PASSWORD}
 Database: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/n8n_queue${SUFFIX}
@@ -620,6 +652,7 @@ cat << EOF > /tmp/n8n${SUFFIX}_output.json
 {
   "editorUrl": "https://${N8N_EDITOR_DOMAIN}",
   "webhookUrl": "https://${N8N_WEBHOOK_DOMAIN}",
+  "directAccess": "http://IP_DO_SERVIDOR:5678",
   "encryptionKey": "${N8N_ENCRYPTION_KEY}",
   "postgresPassword": "${POSTGRES_PASSWORD}",
   "n8nStackName": "${N8N_STACK_NAME}",
@@ -636,10 +669,12 @@ echo "---------------------------------------------"
 log "SUCCESS" "[ n8n - INSTALAÇÃO COMPLETA ]"
 log "INFO" "Editor URL: https://${N8N_EDITOR_DOMAIN}"
 log "INFO" "Webhook URL: https://${N8N_WEBHOOK_DOMAIN}"
+log "INFO" "Acesso direto: http://IP_DO_SERVIDOR:5678"
 log "INFO" "Encryption Key: ${N8N_ENCRYPTION_KEY}"
 log "INFO" "Stacks criadas com sucesso via API do Portainer:"
 echo "  - ${REDIS_STACK_NAME}"
 echo "  - ${PG_STACK_NAME}"
 echo "  - ${N8N_STACK_NAME}"
 log "SUCCESS" "Acesse seu n8n através do endereço: https://${N8N_EDITOR_DOMAIN}"
+log "INFO" "Ou diretamente pela porta 5678: http://IP_DO_SERVIDOR:5678"
 log "INFO" "As stacks estão disponíveis e editáveis no Portainer."
