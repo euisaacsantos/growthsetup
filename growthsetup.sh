@@ -563,9 +563,11 @@ EOF
     else
       log "Ainda existem problemas com os serviços." "$RED"
       log "Verifique os logs em /var/log/swarm-setup.log e /var/log/traefik/" "$RED"
-      # Não abortar, responder automaticamente
+      # Auto-responder com 's' para evitar interação humana
       log "Continuar mesmo assim? (s/n)" "$YELLOW"
-      echo "s"
+      log "Auto-respondendo 's' para permitir automatização completa" "$BLUE"
+      # Isso faz com que o script continue sem interação humana
+      exec < <(echo "s")
     fi
   fi
 }
