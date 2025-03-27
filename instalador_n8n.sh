@@ -284,7 +284,72 @@ networks:
     name: GrowthNet
 EOL
 
-# Função para processar a criação ou atualização de uma stack (mantida a lógica original)
+# Criar arquivo docker-compose para a stack n8n
+log "INFO" "Criando arquivo docker-compose para a stack n8n..."
+cat > "${N8N_STACK_NAME}.yaml" <<EOL
+version: '3.7'
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      - N8N_HOST=${N8N_EDITOR_DOMAIN}
+      - N8N_PROTOCOL=https
+      - N8N_PORT=5678
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - NODE_ENV=production
+      - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n_queue${SUFFIX}
+      - DB_POSTGRESDB_USER=postgres
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+    volumes:
+      - ${N8N_VOLUME}:/home/node/.n8n
+    networks:
+      - GrowthNet
+    ports:
+      - "5678:5678"
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == worker
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network=GrowthNet"
+        # Editor labels
+        - "traefik.http.routers.n8n-editor${SUFFIX}.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)"
+        - "traefik.http.routers.n8n-editor${SUFFIX}.entrypoints=websecure"
+        - "traefik.http.routers.n8n-editor${SUFFIX}.tls=true"
+        - "traefik.http.routers.n8n-editor${SUFFIX}.tls.certresolver=le"
+        - "traefik.http.services.n8n-editor${SUFFIX}.loadbalancer.server.port=5678"
+        # Webhook labels
+        - "traefik.http.routers.n8n-webhook${SUFFIX}.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)"
+        - "traefik.http.routers.n8n-webhook${SUFFIX}.entrypoints=websecure"
+        - "traefik.http.routers.n8n-webhook${SUFFIX}.tls=true"
+        - "traefik.http.routers.n8n-webhook${SUFFIX}.tls.certresolver=le"
+        - "traefik.http.services.n8n-webhook${SUFFIX}.loadbalancer.server.port=5678"
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+
+volumes:
+  ${N8N_VOLUME}:
+    external: true
+    name: ${N8N_VOLUME}
+
+networks:
+  GrowthNet:
+    external: true
+    name: GrowthNet
+EOL
+
+# Função para processar a criação ou atualização de uma stack
 process_stack() {
     local stack_name=$1
     local yaml_file="${stack_name}.yaml"
@@ -301,8 +366,6 @@ process_stack() {
             error_exit "Falha ao instalar jq. Necessário para processamento de JSON."
         }
     fi
-
-    # Restante da lógica original de autenticação e deploy (mantida na íntegra)
     
     # Usar curl com a opção -k para ignorar verificação de certificado
     AUTH_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/auth" \
@@ -362,9 +425,7 @@ process_stack() {
     fi
 
     log "INFO" "Endpoints disponíveis:"
-    ENDPOINTS_LIST=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*,"Name":"[^"]*' | sed 's/"Id":\([0-9]*\),"Name":"\([^"]*\)"/ID:
-
-1, Nome: \2/)
+    ENDPOINTS_LIST=$(echo "$ENDPOINTS_BODY" | grep -o '"Id":[0-9]*,"Name":"[^"]*' | sed 's/"Id":\([0-9]*\),"Name":"\([^"]*\)"/ID: \1, Nome: \2/')
     echo "$ENDPOINTS_LIST"
 
     # Selecionar automaticamente o primeiro endpoint disponível
@@ -528,12 +589,6 @@ deploy_n8n_stack() {
     log "SUCCESS" "Deploy completo da stack n8n com sucesso!"
     return 0
 }
-
-# Criar arquivo docker-compose para a stack n8n (todo o bloco anterior de criação de n8n mantido na íntegra)
-log "INFO" "Criando arquivo docker-compose para a stack n8n..."
-cat > "${N8N_STACK_NAME}.yaml" <<EOL
-(Conteúdo do arquivo n8n.yaml anterior mantido na íntegra)
-EOL
 
 # Processo de deploy
 log "INFO" "Iniciando processo de deploy da stack n8n"
