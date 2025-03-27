@@ -59,13 +59,15 @@ log "Log iniciado em $LOG_FILE" "$BLUE"
 
 # Verificar argumentos
 if [ "$#" -lt 1 ]; then
-  log "Uso: $0 <dominio-portainer> [email]" "$RED"
-  log "Exemplo: $0 painel.exemplo.com admin@exemplo.com" "$YELLOW"
+  log "Uso: $0 <subdominio-portainer> [dominio-principal] [email]" "$RED"
+  log "Exemplo: $0 portainer exemplo.com admin@exemplo.com" "$YELLOW"
   exit 1
 fi
 
-PORTAINER_DOMAIN="$1"
-EMAIL="${2:-admin@example.com}"
+PORTAINER_SUBDOMAIN="$1"
+DOMAIN="${2:-localhost}"
+EMAIL="${3:-admin@$DOMAIN}"
+PORTAINER_DOMAIN="${PORTAINER_SUBDOMAIN}.${DOMAIN}"
 
 log "Configurando com Portainer em: ${PORTAINER_DOMAIN}"
 log "Email para certificados SSL: ${EMAIL}"
