@@ -293,10 +293,6 @@ install_portainer() {
   # Criar diretório para stack file
   mkdir -p /opt/stacks/portainer
   
-  # Gerar senha inicial para o admin
-  ADMIN_PASSWORD=$(openssl rand -base64 12)
-  ADMIN_PASSWORD_HASH=$(docker run --rm httpd:2.4-alpine htpasswd -nbB admin "$ADMIN_PASSWORD" | cut -d ":" -f 2)
-  
   # Criar compose file para o Portainer
   cat > /opt/stacks/portainer/docker-compose.yml << EOF
 version: "3.7"
@@ -315,7 +311,8 @@ services:
 
   portainer:
     image: portainer/portainer-ce:latest
-    command: -H tcp://tasks.agent:9001 --tlsskipverify --admin-password="${ADMIN_PASSWORD_HASH}"
+    # Remova a opção de senha do comando e use volumes para inicialização
+    command: -H tcp://tasks.agent:9001 --tlsskipverify
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
@@ -350,22 +347,10 @@ EOF
   # Implantar o stack do Portainer
   docker stack deploy -c /opt/stacks/portainer/docker-compose.yml portainer || handle_error "Falha ao criar stack do Portainer" "implantação do Portainer"
   
-  # Salvar as credenciais em um arquivo seguro
-  mkdir -p /root/.credentials
-  chmod 700 /root/.credentials
-  cat > /root/.credentials/portainer.txt << EOF
-Portainer Admin Credentials
-URL: https://${PORTAINER_DOMAIN}
-Username: admin
-Password: ${ADMIN_PASSWORD}
-EOF
-  chmod 600 /root/.credentials/portainer.txt
-  
   log "Stack do Portainer implantado com sucesso!"
-  log "Credenciais salvas em: /root/.credentials/portainer.txt" "$YELLOW"
   log "URL do Portainer: https://${PORTAINER_DOMAIN}" "$YELLOW"
-  log "Usuário: admin" "$YELLOW"
-  log "Senha: ${ADMIN_PASSWORD}" "$YELLOW"
+  log "No primeiro acesso, você deverá definir a senha do admin manualmente" "$YELLOW"
+  log "Acesse https://${PORTAINER_DOMAIN} para completar a configuração" "$YELLOW"
 }
 
 # Verificar saúde dos serviços
@@ -521,6 +506,7 @@ EOF
       log "Todos os problemas foram resolvidos!" "$GREEN"
       log "Configuração concluída com sucesso!" "$GREEN"
       log "Portainer está disponível em: https://${PORTAINER_DOMAIN}" "$GREEN"
+      log "Acesse a URL acima para definir a senha de administrador no primeiro acesso" "$GREEN"
     else
       log "Ainda existem problemas com os serviços." "$RED"
       log "Verifique os logs em /var/log/swarm-setup.log e /var/log/traefik/" "$RED"
