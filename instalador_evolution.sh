@@ -1,12 +1,14 @@
 #!/bin/bash
 # Script para criar stacks separadas no Portainer (Evolution, Redis e PostgreSQL)
-# Uso: ./script.sh <portainer_url> <evolution_domain> <portainer_password> [sufixo]
-# Exemplo: ./script.sh painel.trafegocomia.com api.trafegocomia.com senha123 cliente1
+# Uso: ./script.sh <portainer_url> <evolution_domain> <portainer_password> [sufixo] [id-xxxx]
+# Exemplo: ./script.sh painel.trafegocomia.com api.trafegocomia.com senha123 cliente1 id-12341221125
+# Ou sem sufixo: ./script.sh painel.trafegocomia.com api.trafegocomia.com senha123 "" id-12341221125
 
 # Verificar parâmetros obrigatórios
 if [ $# -lt 3 ]; then
-    echo "Uso: $0 <portainer_url> <evolution_domain> <portainer_password> [sufixo]"
-    echo "Exemplo: $0 painel.trafegocomia.com api.trafegocomia.com senha123 cliente1"
+    echo "Uso: $0 <portainer_url> <evolution_domain> <portainer_password> [sufixo] [id-xxxx]"
+    echo "Exemplo: $0 painel.trafegocomia.com api.trafegocomia.com senha123 cliente1 id-12341221125"
+    echo "Sem sufixo: $0 painel.trafegocomia.com api.trafegocomia.com senha123 \"\" id-12341221125"
     exit 1
 fi
 
@@ -15,20 +17,29 @@ PORTAINER_URL="https://$1"        # URL do Portainer
 EVOLUTION_DOMAIN="$2"             # Domínio para a Evolution API
 PORTAINER_PASSWORD="$3"           # Senha do Portainer
 
-# Verificar se há sufixo (para múltiplas instâncias)
-if [ -n "$4" ]; then
-    SUFFIX="_$4"
-    echo "Instalando com sufixo: $SUFFIX"
-else
-    SUFFIX=""
-    echo "Instalando primeira instância (sem sufixo)"
-fi
+# Inicializar variáveis
+SUFFIX=""
+INSTALLATION_ID="sem_id"
+
+# Processar parâmetros opcionais (sufixo e ID)
+for param in "${@:4}"; do
+    # Verificar se o parâmetro começa com 'id-'
+    if [[ "$param" == id-* ]]; then
+        INSTALLATION_ID="${param#id-}"  # Remover o prefixo 'id-'
+        echo "ID da instalação: $INSTALLATION_ID"
+    # Se não for vazio e não começar com 'id-', é o sufixo
+    elif [ -n "$param" ]; then
+        SUFFIX="_$param"
+        echo "Instalando com sufixo: $SUFFIX"
+    fi
+done
 
 # Configurações adicionais
 PORTAINER_USER="admin"              # Usuário do Portainer
 REDIS_STACK_NAME="redis${SUFFIX}"   # Nome da stack Redis
 PG_STACK_NAME="postgres${SUFFIX}"   # Nome da stack PostgreSQL
 EVO_STACK_NAME="evolution${SUFFIX}" # Nome da stack Evolution
+WEBHOOK_URL="https://webhook.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
 
 # Cores para formatação
 AMARELO="\e[33m"
@@ -458,6 +469,34 @@ if [ $? -ne 0 ]; then
     error_exit "Falha ao implementar a stack Evolution."
 fi
 
+# Preparar os dados para o webhook
+timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+hostname=$(hostname)
+server_ip=$(hostname -I | awk '{print $1}')
+
+# Criar objeto JSON para o webhook
+WEBHOOK_DATA=$(cat << EOF
+{
+  "installation_id": "${INSTALLATION_ID}",
+  "timestamp": "${timestamp}",
+  "hostname": "${hostname}",
+  "server_ip": "${server_ip}",
+  "evolution": {
+    "domain": "${EVOLUTION_DOMAIN}",
+    "api_key": "${API_KEY}",
+    "manager_url": "https://${EVOLUTION_DOMAIN}/manager",
+    "database_uri": "postgresql://postgres:b2ecbaa44551df03fa3793b38091cff7@postgres${SUFFIX}:5432/evolution${SUFFIX}"
+  },
+  "stacks": {
+    "redis": "${REDIS_STACK_NAME}",
+    "postgres": "${PG_STACK_NAME}",
+    "evolution": "${EVO_STACK_NAME}"
+  },
+  "suffix": "${SUFFIX}"
+}
+EOF
+)
+
 # Salvar credenciais
 CREDENTIALS_DIR="/root/.credentials"
 if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
@@ -475,7 +514,7 @@ else
     echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
 fi
 
-# Criar um objeto JSON de saída para o n8n
+# Criar um objeto JSON de saída para o relatório local
 cat << EOF > /tmp/evolution${SUFFIX}_output.json
 {
   "url": "https://${EVOLUTION_DOMAIN}",
@@ -489,6 +528,23 @@ cat << EOF > /tmp/evolution${SUFFIX}_output.json
 EOF
 
 echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/evolution${SUFFIX}_output.json${RESET}"
+
+# Enviar dados para o webhook
+echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
+WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
+  -H "Content-Type: application/json" \
+  -d "${WEBHOOK_DATA}" \
+  -w "\n%{http_code}")
+
+HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
+WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
+    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
+else
+    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
+    echo "Resposta: ${WEBHOOK_BODY}"
+fi
 
 echo "---------------------------------------------"
 echo -e "${VERDE}[ EVOLUTION API - INSTALAÇÃO COMPLETA ]${RESET}"
