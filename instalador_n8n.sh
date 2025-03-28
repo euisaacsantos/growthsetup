@@ -38,9 +38,34 @@ VERMELHO="\e[31m"
 RESET="\e[0m"
 BEGE="\e[97m"
 
-# Gerar uma chave de criptografia do n8n aleatória
-N8N_ENCRYPTION_KEY=$(openssl rand -hex 16)
-echo -e "${VERDE}Chave de criptografia do n8n gerada: ${RESET}${N8N_ENCRYPTION_KEY}"
+# Verificar se já existe uma chave de criptografia no volume n8n_data
+echo -e "${VERDE}Verificando se já existe uma chave de criptografia...${RESET}"
+EXISTING_KEY=""
+
+# Tenta extrair a chave existente de um container temporário
+if docker volume inspect n8n_data${SUFFIX} &>/dev/null; then
+    echo -e "${AMARELO}Volume n8n_data${SUFFIX} já existe. Tentando extrair a chave existente...${RESET}"
+    
+    # Criar um container temporário para acessar o arquivo de configuração
+    docker run --rm -v n8n_data${SUFFIX}:/data alpine:latest sh -c "if [ -f /data/.n8n/config ]; then cat /data/.n8n/config | grep -o '\"encryptionKey\":\"[^\"]*\"' | cut -d '\"' -f 4; fi" > /tmp/existing_key_output.txt
+    
+    EXISTING_KEY=$(cat /tmp/existing_key_output.txt)
+    rm -f /tmp/existing_key_output.txt
+    
+    if [ -n "$EXISTING_KEY" ]; then
+        echo -e "${VERDE}Chave de criptografia existente encontrada. Usando-a em vez de gerar uma nova.${RESET}"
+        N8N_ENCRYPTION_KEY=$EXISTING_KEY
+    else
+        echo -e "${AMARELO}Não foi possível extrair a chave existente ou o arquivo de configuração não existe.${RESET}"
+        echo -e "${VERDE}Gerando uma nova chave de criptografia...${RESET}"
+        N8N_ENCRYPTION_KEY=$(openssl rand -hex 16)
+    fi
+else
+    echo -e "${VERDE}Volume n8n_data${SUFFIX} não existe. Gerando uma nova chave de criptografia...${RESET}"
+    N8N_ENCRYPTION_KEY=$(openssl rand -hex 16)
+fi
+
+echo -e "${VERDE}Chave de criptografia do n8n: ${RESET}${N8N_ENCRYPTION_KEY}"
 
 # Gerar uma senha do PostgreSQL aleatória
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
