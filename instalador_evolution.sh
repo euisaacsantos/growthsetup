@@ -36,9 +36,12 @@ done
 
 # Configurações adicionais
 PORTAINER_USER="admin"              # Usuário do Portainer
-REDIS_STACK_NAME="redis${SUFFIX}"   # Nome da stack Redis
-PG_STACK_NAME="postgres${SUFFIX}"   # Nome da stack PostgreSQL
 EVO_STACK_NAME="evolution${SUFFIX}" # Nome da stack Evolution
+
+# Nomes únicos para as stacks do Redis e PostgreSQL (prefixados com evolution_)
+REDIS_STACK_NAME="evolution_redis${SUFFIX}"   # Nome da stack Redis com prefixo evolution_
+PG_STACK_NAME="evolution_postgres${SUFFIX}"   # Nome da stack PostgreSQL com prefixo evolution_
+
 WEBHOOK_URL="https://webhook.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
 
 # Cores para formatação
@@ -86,8 +89,8 @@ error_exit() {
 
 # Criar volumes Docker necessários
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
-docker volume create redis_data${SUFFIX} 2>/dev/null || echo "Volume redis_data${SUFFIX} já existe."
-docker volume create postgres_data${SUFFIX} 2>/dev/null || echo "Volume postgres_data${SUFFIX} já existe."
+docker volume create evolution_redis_data${SUFFIX} 2>/dev/null || echo "Volume evolution_redis_data${SUFFIX} já existe."
+docker volume create evolution_postgres_data${SUFFIX} 2>/dev/null || echo "Volume evolution_postgres_data${SUFFIX} já existe."
 docker volume create evolution_instances${SUFFIX} 2>/dev/null || echo "Volume evolution_instances${SUFFIX} já existe."
 
 # Criar rede overlay se não existir
@@ -102,7 +105,7 @@ services:
     image: redis:latest
     command: redis-server --appendonly yes
     volumes:
-      - redis_data${SUFFIX}:/data
+      - evolution_redis_data${SUFFIX}:/data
     networks:
       - GrowthNet
     deploy:
@@ -113,7 +116,7 @@ services:
         - node.role == manager
 
 volumes:
-  redis_data${SUFFIX}:
+  evolution_redis_data${SUFFIX}:
     external: true
 
 networks:
@@ -133,7 +136,7 @@ services:
       - POSTGRES_PASSWORD=b2ecbaa44551df03fa3793b38091cff7
       - POSTGRES_USER=postgres
     volumes:
-      - postgres_data${SUFFIX}:/var/lib/postgresql/data
+      - evolution_postgres_data${SUFFIX}:/var/lib/postgresql/data
     networks:
       - GrowthNet
     deploy:
@@ -144,7 +147,7 @@ services:
         - node.role == manager
 
 volumes:
-  postgres_data${SUFFIX}:
+  evolution_postgres_data${SUFFIX}:
     external: true
 
 networks:
