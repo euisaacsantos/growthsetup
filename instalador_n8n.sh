@@ -39,8 +39,10 @@ done
 # Configurações adicionais
 PORTAINER_USER="admin"              # Usuário do Portainer
 N8N_STACK_NAME="n8n${SUFFIX}"       # Nome da stack n8n
-REDIS_STACK_NAME="redis${SUFFIX}"   # Nome da stack Redis
-PG_STACK_NAME="postgres${SUFFIX}"   # Nome da stack PostgreSQL
+
+# Nomes únicos para as stacks do Redis e PostgreSQL (prefixados com n8n_)
+REDIS_STACK_NAME="n8n_redis${SUFFIX}"   # Nome da stack Redis com prefixo n8n_
+PG_STACK_NAME="n8n_postgres${SUFFIX}"   # Nome da stack PostgreSQL com prefixo n8n_
 
 # Cores para formatação
 AMARELO="\e[33m"
@@ -91,8 +93,8 @@ error_exit() {
 # Criar volumes Docker necessários
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
 docker volume create n8n_data${SUFFIX} 2>/dev/null || echo "Volume n8n_data${SUFFIX} já existe."
-docker volume create postgres_data${SUFFIX} 2>/dev/null || echo "Volume postgres_data${SUFFIX} já existe."
-docker volume create redis_data${SUFFIX} 2>/dev/null || echo "Volume redis_data${SUFFIX} já existe."
+docker volume create n8n_postgres_data${SUFFIX} 2>/dev/null || echo "Volume n8n_postgres_data${SUFFIX} já existe."
+docker volume create n8n_redis_data${SUFFIX} 2>/dev/null || echo "Volume n8n_redis_data${SUFFIX} já existe."
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 docker network inspect GrowthNet >/dev/null 2>&1 || {
@@ -110,7 +112,7 @@ services:
     image: redis:latest
     command: redis-server --appendonly yes
     volumes:
-      - redis_data${SUFFIX}:/data
+      - n8n_redis_data${SUFFIX}:/data
     networks:
       - GrowthNet
     deploy:
@@ -129,7 +131,7 @@ services:
         max_attempts: 3
 
 volumes:
-  redis_data${SUFFIX}:
+  n8n_redis_data${SUFFIX}:
     external: true
 
 networks:
@@ -151,7 +153,7 @@ services:
       # Inicializa o banco de dados necessário para o n8n
       - POSTGRES_DB=n8n_queue${SUFFIX}
     volumes:
-      - postgres_data${SUFFIX}:/var/lib/postgresql/data
+      - n8n_postgres_data${SUFFIX}:/var/lib/postgresql/data
     networks:
       - GrowthNet
     deploy:
@@ -170,7 +172,7 @@ services:
         max_attempts: 3
 
 volumes:
-  postgres_data${SUFFIX}:
+  n8n_postgres_data${SUFFIX}:
     external: true
 
 networks:
