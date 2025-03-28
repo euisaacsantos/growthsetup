@@ -99,6 +99,7 @@ volumes:
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Criar arquivo docker-compose para a stack PostgreSQL
@@ -139,6 +140,7 @@ volumes:
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Criar arquivo docker-compose para a stack n8n
@@ -225,8 +227,11 @@ services:
         - "traefik.http.routers.n8n_editor${SUFFIX}.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)"
         - traefik.http.routers.n8n_editor${SUFFIX}.entrypoints=websecure
         - traefik.http.routers.n8n_editor${SUFFIX}.tls=true
-        - traefik.http.routers.n8n_editor${SUFFIX}.tls.certresolver=letsencrypt
+        - traefik.http.routers.n8n_editor${SUFFIX}.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.n8n_editor${SUFFIX}.priority=1
+        - traefik.http.routers.n8n_editor${SUFFIX}.service=n8n_editor${SUFFIX}
         - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.server.port=5678
+        - traefik.http.services.n8n_editor${SUFFIX}.loadbalancer.passHostHeader=1
 
 ## --------------------------- n8n Webhook --------------------------- ##
 
@@ -306,8 +311,11 @@ services:
         - "traefik.http.routers.n8n_webhook${SUFFIX}.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)"
         - traefik.http.routers.n8n_webhook${SUFFIX}.entrypoints=websecure
         - traefik.http.routers.n8n_webhook${SUFFIX}.tls=true
-        - traefik.http.routers.n8n_webhook${SUFFIX}.tls.certresolver=letsencrypt
+        - traefik.http.routers.n8n_webhook${SUFFIX}.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.n8n_webhook${SUFFIX}.priority=1
+        - traefik.http.routers.n8n_webhook${SUFFIX}.service=n8n_webhook${SUFFIX}
         - traefik.http.services.n8n_webhook${SUFFIX}.loadbalancer.server.port=5678
+        - traefik.http.services.n8n_webhook${SUFFIX}.loadbalancer.passHostHeader=1
 
 ## --------------------------- n8n Worker --------------------------- ##
 
@@ -389,6 +397,7 @@ volumes:
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Verificar se jq está instalado
