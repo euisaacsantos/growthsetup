@@ -37,9 +37,35 @@ VERMELHO="\e[31m"
 RESET="\e[0m"
 BEGE="\e[97m"
 
-# Gerar uma chave API aleatória para a Evolution
-API_KEY=$(openssl rand -hex 16)
-echo -e "${VERDE}Chave API gerada: ${RESET}${API_KEY}"
+# Verificar se já existe uma API key no volume evolution_instances
+echo -e "${VERDE}Verificando se já existe uma API key...${RESET}"
+EXISTING_API_KEY=""
+
+# Tenta extrair a API key existente de um container temporário
+if docker volume inspect evolution_instances${SUFFIX} &>/dev/null; then
+    echo -e "${AMARELO}Volume evolution_instances${SUFFIX} já existe. Tentando extrair a API key existente...${RESET}"
+    
+    # Criar um container temporário para tentar encontrar a API key no volume
+    # Isso é um exemplo - a API key pode estar armazenada em diferentes formatos/locais
+    docker run --rm -v evolution_instances${SUFFIX}:/data alpine:latest sh -c "if [ -f /data/config.json ]; then grep -o '\"apiKey\":\"[^\"]*\"' /data/config.json | cut -d '\"' -f 4; fi" > /tmp/existing_api_key_output.txt
+    
+    EXISTING_API_KEY=$(cat /tmp/existing_api_key_output.txt)
+    rm -f /tmp/existing_api_key_output.txt
+    
+    if [ -n "$EXISTING_API_KEY" ]; then
+        echo -e "${VERDE}API key existente encontrada. Usando-a em vez de gerar uma nova.${RESET}"
+        API_KEY=$EXISTING_API_KEY
+    else
+        echo -e "${AMARELO}Não foi possível extrair a API key existente ou o arquivo de configuração não existe.${RESET}"
+        echo -e "${VERDE}Gerando uma nova API key...${RESET}"
+        API_KEY=$(openssl rand -hex 16)
+    fi
+else
+    echo -e "${VERDE}Volume evolution_instances${SUFFIX} não existe. Gerando uma nova API key...${RESET}"
+    API_KEY=$(openssl rand -hex 16)
+fi
+
+echo -e "${VERDE}API key: ${RESET}${API_KEY}"
 
 # Função para exibir erros e sair
 error_exit() {
@@ -82,6 +108,7 @@ volumes:
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Criar arquivo docker-compose para a stack PostgreSQL
@@ -112,6 +139,7 @@ volumes:
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Criar arquivo docker-compose para a stack Evolution
@@ -171,9 +199,10 @@ services:
       - traefik.http.routers.evolution${SUFFIX}.rule=Host(\`${EVOLUTION_DOMAIN}\`)
       - traefik.http.routers.evolution${SUFFIX}.entrypoints=websecure
       - traefik.http.routers.evolution${SUFFIX}.priority=1
-      - traefik.http.routers.evolution${SUFFIX}.tls.certresolver=letsencrypt
+      - traefik.http.routers.evolution${SUFFIX}.tls.certresolver=letsencryptresolver
       - traefik.http.routers.evolution${SUFFIX}.service=evolution${SUFFIX}
       - traefik.http.services.evolution${SUFFIX}.loadbalancer.server.port=8080
+      - traefik.http.services.evolution${SUFFIX}.loadbalancer.passHostHeader=1
 
 volumes:
   evolution_instances${SUFFIX}:
@@ -182,6 +211,7 @@ volumes:
 networks:
   GrowthNet:
     external: true
+    name: GrowthNet
 EOL
 
 # Verificar se jq está instalado
