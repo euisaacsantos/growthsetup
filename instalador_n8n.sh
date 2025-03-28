@@ -1,12 +1,14 @@
 #!/bin/bash
 # Script para criar stacks separadas para n8n no Portainer (n8n, Redis e PostgreSQL)
-# Uso: ./script.sh <portainer_url> <n8n_editor_domain> <n8n_webhook_domain> <portainer_password> [sufixo]
-# Exemplo: ./script.sh painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 cliente1
+# Uso: ./script.sh <portainer_url> <n8n_editor_domain> <n8n_webhook_domain> <portainer_password> [sufixo] [id-xxxx]
+# Exemplo: ./script.sh painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 cliente1 id-12341221125
+# Sem sufixo: ./script.sh painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 "" id-12341221125
 
 # Verificar parâmetros obrigatórios
 if [ $# -lt 4 ]; then
-    echo "Uso: $0 <portainer_url> <n8n_editor_domain> <n8n_webhook_domain> <portainer_password> [sufixo]"
-    echo "Exemplo: $0 painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 cliente1"
+    echo "Uso: $0 <portainer_url> <n8n_editor_domain> <n8n_webhook_domain> <portainer_password> [sufixo] [id-xxxx]"
+    echo "Exemplo: $0 painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 cliente1 id-12341221125"
+    echo "Sem sufixo: $0 painel.trafegocomia.com editor.growthtap.com.br webhook.growthtap.com.br senha123 \"\" id-12341221125"
     exit 1
 fi
 
@@ -16,14 +18,23 @@ N8N_EDITOR_DOMAIN="$2"               # Domínio para o editor n8n
 N8N_WEBHOOK_DOMAIN="$3"              # Domínio para webhook n8n
 PORTAINER_PASSWORD="$4"              # Senha do Portainer
 
-# Verificar se há sufixo (para múltiplas instâncias)
-if [ -n "$5" ]; then
-    SUFFIX="_$5"
-    echo "Instalando com sufixo: $SUFFIX"
-else
-    SUFFIX=""
-    echo "Instalando primeira instância (sem sufixo)"
-fi
+# Inicializar variáveis
+SUFFIX=""
+INSTALLATION_ID="sem_id"
+WEBHOOK_URL="https://webhook.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
+
+# Processar parâmetros opcionais (sufixo e ID)
+for param in "${@:5}"; do
+    # Verificar se o parâmetro começa com 'id-'
+    if [[ "$param" == id-* ]]; then
+        INSTALLATION_ID="${param#id-}"  # Remover o prefixo 'id-'
+        echo "ID da instalação: $INSTALLATION_ID"
+    # Se não for vazio e não começar com 'id-', é o sufixo
+    elif [ -n "$param" ]; then
+        SUFFIX="_$param"
+        echo "Instalando com sufixo: $SUFFIX"
+    fi
+done
 
 # Configurações adicionais
 PORTAINER_USER="admin"              # Usuário do Portainer
@@ -674,6 +685,34 @@ if [ $? -ne 0 ]; then
     error_exit "Falha ao implementar a stack n8n."
 fi
 
+# Preparar os dados para o webhook
+timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+hostname=$(hostname)
+server_ip=$(hostname -I | awk '{print $1}')
+
+# Criar objeto JSON para o webhook
+WEBHOOK_DATA=$(cat << EOF
+{
+  "installation_id": "${INSTALLATION_ID}",
+  "timestamp": "${timestamp}",
+  "hostname": "${hostname}",
+  "server_ip": "${server_ip}",
+  "n8n": {
+    "editor_domain": "${N8N_EDITOR_DOMAIN}",
+    "webhook_domain": "${N8N_WEBHOOK_DOMAIN}",
+    "encryption_key": "${N8N_ENCRYPTION_KEY}",
+    "database_uri": "postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/n8n_queue${SUFFIX}"
+  },
+  "stacks": {
+    "redis": "${REDIS_STACK_NAME}",
+    "postgres": "${PG_STACK_NAME}",
+    "n8n": "${N8N_STACK_NAME}"
+  },
+  "suffix": "${SUFFIX}"
+}
+EOF
+)
+
 # Salvar credenciais
 CREDENTIALS_DIR="/root/.credentials"
 if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
@@ -709,6 +748,23 @@ cat << EOF > /tmp/n8n${SUFFIX}_output.json
 EOF
 
 echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/n8n${SUFFIX}_output.json${RESET}"
+
+# Enviar dados para o webhook
+echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
+WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
+  -H "Content-Type: application/json" \
+  -d "${WEBHOOK_DATA}" \
+  -w "\n%{http_code}")
+
+HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
+WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
+    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
+else
+    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
+    echo "Resposta: ${WEBHOOK_BODY}"
+fi
 
 echo "---------------------------------------------"
 echo -e "${VERDE}[ n8n - INSTALAÇÃO COMPLETA ]${RESET}"
