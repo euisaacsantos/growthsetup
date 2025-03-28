@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script para configuração de Docker Swarm, Portainer e Traefik
-# Versão: 7.0 - Solução final para o problema de login
-# Data: 27/03/2025
+# Versão: 7.1 - Com suporte a ID de instalação e envio para webhook
+# Data: 29/03/2025
 
 # Cores para melhor visualização
 GREEN='\033[0;32m'
@@ -16,6 +16,7 @@ RETRY_COUNT=0
 SCRIPT_NAME=$(basename "$0")
 LOG_FILE="/var/log/swarm-setup.log"
 NETWORK_NAME="GrowthNet"
+WEBHOOK_URL="https://webhook.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
 
 # Função para exibir mensagens
 log() {
@@ -59,14 +60,26 @@ log "Log iniciado em $LOG_FILE" "$BLUE"
 
 # Verificar argumentos
 if [ "$#" -lt 1 ]; then
-  log "Uso: $0 <subdominio-portainer> [dominio-principal] [email]" "$RED"
-  log "Exemplo: $0 portainer exemplo.com admin@exemplo.com" "$YELLOW"
+  log "Uso: $0 <subdominio-portainer> [dominio-principal] [email] [id-xxxx]" "$RED"
+  log "Exemplo: $0 portainer exemplo.com admin@exemplo.com id-12341221125" "$YELLOW"
   exit 1
 fi
 
 PORTAINER_SUBDOMAIN="$1"
 DOMAIN="${2:-localhost}"
 EMAIL="${3:-admin@$DOMAIN}"
+INSTALLATION_ID="sem_id"
+
+# Verificar se há ID de instalação nos argumentos
+for param in "$@"; do
+  # Verificar se o parâmetro começa com 'id-'
+  if [[ "$param" == id-* ]]; then
+    INSTALLATION_ID="${param#id-}"  # Remover o prefixo 'id-'
+    log "ID da instalação: $INSTALLATION_ID" "$BLUE"
+    break
+  fi
+done
+
 PORTAINER_DOMAIN="${PORTAINER_SUBDOMAIN}.${DOMAIN}"
 
 log "Configurando com Portainer em: ${PORTAINER_DOMAIN}"
@@ -353,6 +366,7 @@ services:
         - "traefik.docker.network=${NETWORK_NAME}"
         - "traefik.http.routers.portainer.entrypoints=websecure"
         - "traefik.http.routers.portainer.priority=1"
+        - "traefik.http.services.portainer.loadbalancer.passHostHeader=1"
 
 volumes:
   portainer_data:
@@ -405,6 +419,69 @@ check_services() {
   
   log "Todos os serviços estão saudáveis!" "$GREEN"
   return 0
+}
+
+# Enviar informações para o webhook
+send_to_webhook() {
+  log "Enviando informações da instalação para o webhook..." "$BLUE"
+  
+  # Coletar informações do servidor
+  local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+  local hostname=$(hostname)
+  local server_ip=$(hostname -I | awk '{print $1}')
+  local os_info=$(cat /etc/os-release | grep "PRETTY_NAME" | cut -d '"' -f 2)
+  local kernel_version=$(uname -r)
+  local cpu_info=$(grep "model name" /proc/cpuinfo | head -1 | cut -d ':' -f 2 | xargs)
+  local mem_total=$(free -m | awk '/^Mem:/{print $2}')
+  local disk_size=$(df -h / | awk 'NR==2 {print $2}')
+  local disk_used=$(df -h / | awk 'NR==2 {print $3}')
+  
+  # Preparar os dados para enviar ao webhook
+  local webhook_data=$(cat << EOF
+{
+  "installation_id": "${INSTALLATION_ID}",
+  "timestamp": "${timestamp}",
+  "hostname": "${hostname}",
+  "server_ip": "${server_ip}",
+  "system_info": {
+    "os": "${os_info}",
+    "kernel": "${kernel_version}",
+    "cpu": "${cpu_info}",
+    "memory_mb": ${mem_total},
+    "disk_size": "${disk_size}",
+    "disk_used": "${disk_used}"
+  },
+  "portainer": {
+    "url": "https://${PORTAINER_DOMAIN}",
+    "username": "admin",
+    "password": "${ADMIN_PASSWORD}",
+    "version": "2.19.0"
+  },
+  "traefik": {
+    "version": "v2.11.2",
+    "domain": "${DOMAIN}",
+    "email": "${EMAIL}"
+  },
+  "network_name": "${NETWORK_NAME}"
+}
+EOF
+)
+  
+  # Enviar para o webhook
+  local response=$(curl -s -X POST "$WEBHOOK_URL" \
+    -H "Content-Type: application/json" \
+    -d "$webhook_data" \
+    -w "\n%{http_code}")
+  
+  local http_code=$(echo "$response" | tail -n1)
+  local body=$(echo "$response" | sed '$d')
+  
+  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ] || [ "$http_code" -eq 202 ]; then
+    log "Dados enviados para o webhook com sucesso!" "$GREEN"
+  else
+    log "Erro ao enviar dados para o webhook. Código: $http_code" "$YELLOW"
+    log "Resposta: $body" "$YELLOW"
+  fi
 }
 
 # Função para fazer diagnóstico e correção automática
@@ -526,6 +603,9 @@ EOF
     log "IMPORTANTE: No primeiro acesso, você precisará definir uma senha para o admin" "$YELLOW"
     log "Senha sugerida: $(cat /root/.credentials/portainer_password.txt)" "$GREEN"
     log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+    
+    # Enviar dados para o webhook
+    send_to_webhook
   else
     log "Alguns serviços não estão funcionando corretamente." "$RED"
     troubleshoot_services
@@ -538,9 +618,17 @@ EOF
       log "IMPORTANTE: No primeiro acesso, você precisará definir uma senha para o admin" "$YELLOW"
       log "Senha sugerida: $(cat /root/.credentials/portainer_password.txt)" "$GREEN"
       log "Credenciais salvas em: /root/.credentials/portainer.txt" "$GREEN"
+      
+      # Enviar dados para o webhook
+      send_to_webhook
     else
       log "Ainda existem problemas com os serviços." "$RED"
       log "Verifique os logs em /var/log/swarm-setup.log e /var/log/traefik/" "$RED"
+      
+      # Tenta enviar dados para o webhook mesmo com problemas
+      log "Enviando dados para o webhook mesmo com problemas..." "$YELLOW"
+      send_to_webhook
+      
       # Auto-responder com 's' para evitar interação humana
       log "Continuar mesmo assim? (s/n)" "$YELLOW"
       log "Auto-respondendo 's' para permitir automatização completa" "$BLUE"
