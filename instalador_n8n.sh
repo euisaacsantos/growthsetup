@@ -21,7 +21,7 @@ PORTAINER_PASSWORD="$4"              # Senha do Portainer
 # Inicializar variáveis
 SUFFIX=""
 INSTALLATION_ID="sem_id"
-WEBHOOK_URL="https://webhook.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
+WEBHOOK_URL="https://setup.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
 
 # Processar parâmetros opcionais (sufixo e ID)
 for param in "${@:5}"; do
