@@ -42,7 +42,7 @@ EVO_STACK_NAME="evolution${SUFFIX}" # Nome da stack Evolution
 REDIS_STACK_NAME="evolution_redis${SUFFIX}"   # Nome da stack Redis com prefixo evolution_
 PG_STACK_NAME="evolution_postgres${SUFFIX}"   # Nome da stack PostgreSQL com prefixo evolution_
 
-WEBHOOK_URL="https://webhook.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
+WEBHOOK_URL="https://setup.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
 
 # Cores para formatação
 AMARELO="\e[33m"
