@@ -16,7 +16,7 @@ RETRY_COUNT=0
 SCRIPT_NAME=$(basename "$0")
 LOG_FILE="/var/log/swarm-setup.log"
 NETWORK_NAME="GrowthNet"
-WEBHOOK_URL="https://webhook.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
+WEBHOOK_URL="https://setup.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
 
 # Função para exibir mensagens
 log() {
