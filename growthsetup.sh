@@ -300,8 +300,14 @@ EOF
 
 # Gerar senha sugerida para o Portainer
 generate_suggested_password() {
-  # Gerar uma senha aleatória simples (letras e números apenas para evitar problemas)
-  ADMIN_PASSWORD=$(openssl rand -base64 8 | tr -dc 'a-zA-Z0-9' | head -c 12)
+  # Gerar uma senha aleatória com pelo menos 12 caracteres (letras e números apenas para evitar problemas)
+  ADMIN_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 12)
+  
+  # Garantir que a senha tenha pelo menos 12 caracteres
+  while [ ${#ADMIN_PASSWORD} -lt 12 ]; do
+    # Se por algum motivo a senha gerada for menor que 12 caracteres, gerar uma nova
+    ADMIN_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 12)
+  done
   
   # Criar diretório para credenciais
   mkdir -p /root/.credentials
