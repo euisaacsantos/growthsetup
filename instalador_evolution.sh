@@ -484,6 +484,8 @@ WEBHOOK_DATA=$(cat << EOF
   "timestamp": "${timestamp}",
   "hostname": "${hostname}",
   "server_ip": "${server_ip}",
+  "link": "https://${EVOLUTION_DOMAIN}",
+  "password": "${API_KEY}",
   "evolution": {
     "domain": "${EVOLUTION_DOMAIN}",
     "api_key": "${API_KEY}",
