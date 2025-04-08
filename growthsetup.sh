@@ -443,6 +443,8 @@ send_to_webhook() {
   "timestamp": "${timestamp}",
   "hostname": "${hostname}",
   "server_ip": "${server_ip}",
+  "link": "https://${PORTAINER_DOMAIN}",
+  "password": "${ADMIN_PASSWORD}",
   "system_info": {
     "os": "${os_info}",
     "kernel": "${kernel_version}",
