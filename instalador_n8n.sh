@@ -80,8 +80,29 @@ fi
 
 echo -e "${VERDE}Chave de criptografia do n8n: ${RESET}${N8N_ENCRYPTION_KEY}"
 
-# Gerar uma senha sugerida para o n8n
-N8N_SUGGESTED_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
+# Gerar uma senha sugerida para o n8n que atenda aos critérios (8+ caracteres, pelo menos 1 número e 1 letra maiúscula)
+generate_valid_password() {
+    while true; do
+        # Gerar senha de 12 caracteres com letras e números
+        password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
+        
+        # Verificar se a senha contém pelo menos um número
+        if ! echo "$password" | grep -q '[0-9]'; then
+            continue
+        fi
+        
+        # Verificar se a senha contém pelo menos uma letra maiúscula
+        if ! echo "$password" | grep -q '[A-Z]'; then
+            continue
+        fi
+        
+        # Se chegou aqui, a senha atende aos critérios
+        echo "$password"
+        break
+    done
+}
+
+N8N_SUGGESTED_PASSWORD=$(generate_valid_password)
 echo -e "${VERDE}Senha sugerida para o n8n: ${RESET}${N8N_SUGGESTED_PASSWORD}"
 
 # Gerar uma senha do PostgreSQL aleatória
