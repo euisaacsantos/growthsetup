@@ -51,31 +51,6 @@ VERMELHO="\e[31m"
 RESET="\e[0m"
 BEGE="\e[97m"
 
-# Função para gerar uma senha segura
-generate_secure_password() {
-    # Gerar senha com pelo menos 1 número, 1 letra maiúscula e 1 letra minúscula
-    local length=12
-    local password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w $length | head -n 1)
-    
-    # Garantir que tenha pelo menos um número
-    if ! [[ $password =~ [0-9] ]]; then
-        # Substituir um caractere aleatório por um número
-        local pos=$((RANDOM % $length))
-        local num=$((RANDOM % 10))
-        password=$(echo $password | sed s/./\${num}/$pos/)
-    fi
-    
-    # Garantir que tenha pelo menos uma letra maiúscula
-    if ! [[ $password =~ [A-Z] ]]; then
-        # Substituir um caractere aleatório por uma letra maiúscula
-        local pos=$((RANDOM % $length))
-        local upper=$(echo "ABCDEFGHIJKLMNOPQRSTUVWXYZ" | fold -w1 | shuf | head -n1)
-        password=$(echo $password | sed s/./\${upper}/$pos/)
-    fi
-    
-    echo $password
-}
-
 # Verificar se já existe uma chave de criptografia no volume n8n_data
 echo -e "${VERDE}Verificando se já existe uma chave de criptografia...${RESET}"
 EXISTING_KEY=""
@@ -106,7 +81,7 @@ fi
 echo -e "${VERDE}Chave de criptografia do n8n: ${RESET}${N8N_ENCRYPTION_KEY}"
 
 # Gerar uma senha sugerida para o n8n
-N8N_SUGGESTED_PASSWORD=$(generate_secure_password)
+N8N_SUGGESTED_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
 echo -e "${VERDE}Senha sugerida para o n8n: ${RESET}${N8N_SUGGESTED_PASSWORD}"
 
 # Gerar uma senha do PostgreSQL aleatória
@@ -617,6 +592,11 @@ process_stack() {
         fi
     fi
 
+    # Para depuração - mostrar o conteúdo do arquivo YAML
+    echo -e "${VERDE}Conteúdo do arquivo ${yaml_file}:${RESET}"
+    cat "${yaml_file}"
+    echo
+
     # Criar arquivo temporário para capturar a saída de erro e a resposta
     erro_output=$(mktemp)
     response_output=$(mktemp)
@@ -685,3 +665,125 @@ process_stack() {
     # Remove os arquivos temporários
     rm -f "$erro_output" "$response_output"
 }
+
+# Implementar stacks na ordem correta: primeiro Redis e PostgreSQL, depois n8n
+echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
+
+# Processar Redis primeiro
+process_stack "$REDIS_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar Redis, mas continuando...${RESET}"
+fi
+
+# Processar PostgreSQL segundo
+process_stack "$PG_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar PostgreSQL, mas continuando...${RESET}"
+fi
+
+# Adicionar uma pausa para garantir que os serviços anteriores sejam inicializados
+echo -e "${VERDE}Aguardando 15 segundos para inicialização dos serviços Redis e PostgreSQL...${RESET}"
+sleep 15
+
+# Processar n8n por último (depende dos outros)
+process_stack "$N8N_STACK_NAME"
+if [ $? -ne 0 ]; then
+    error_exit "Falha ao implementar a stack n8n."
+fi
+
+# Preparar os dados para o webhook
+timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+hostname=$(hostname)
+server_ip=$(hostname -I | awk '{print $1}')
+
+# Criar objeto JSON para o webhook
+WEBHOOK_DATA=$(cat << EOF
+{
+  "installation_id": "${INSTALLATION_ID}",
+  "timestamp": "${timestamp}",
+  "hostname": "${hostname}",
+  "server_ip": "${server_ip}",
+  "link": "https://${N8N_EDITOR_DOMAIN}",
+  "password": "${N8N_SUGGESTED_PASSWORD}",
+  "n8n": {
+    "editor_domain": "${N8N_EDITOR_DOMAIN}",
+    "webhook_domain": "${N8N_WEBHOOK_DOMAIN}",
+    "encryption_key": "${N8N_ENCRYPTION_KEY}",
+    "database_uri": "postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/n8n_queue${SUFFIX}"
+  },
+  "stacks": {
+    "redis": "${REDIS_STACK_NAME}",
+    "postgres": "${PG_STACK_NAME}",
+    "n8n": "${N8N_STACK_NAME}"
+  },
+  "suffix": "${SUFFIX}"
+}
+EOF
+)
+
+# Salvar credenciais
+CREDENTIALS_DIR="/root/.credentials"
+if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
+    chmod 700 "$CREDENTIALS_DIR"
+    
+    # Cria o arquivo de credenciais separadamente para evitar problemas com a saída
+    cat > "${CREDENTIALS_DIR}/n8n${SUFFIX}.txt" << EOF
+n8n Information
+Editor URL: https://${N8N_EDITOR_DOMAIN}
+Webhook URL: https://${N8N_WEBHOOK_DOMAIN}
+Senha sugerida: ${N8N_SUGGESTED_PASSWORD}
+Encryption Key: ${N8N_ENCRYPTION_KEY}
+Postgres Password: ${POSTGRES_PASSWORD}
+Database: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/n8n_queue${SUFFIX}
+EOF
+    chmod 600 "${CREDENTIALS_DIR}/n8n${SUFFIX}.txt"
+    echo -e "${VERDE}Credenciais do n8n salvas em ${CREDENTIALS_DIR}/n8n${SUFFIX}.txt${RESET}"
+else
+    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
+fi
+
+# Criar um objeto JSON de saída para integração com outros sistemas
+cat << EOF > /tmp/n8n${SUFFIX}_output.json
+{
+  "editorUrl": "https://${N8N_EDITOR_DOMAIN}",
+  "webhookUrl": "https://${N8N_WEBHOOK_DOMAIN}",
+  "encryptionKey": "${N8N_ENCRYPTION_KEY}",
+  "postgresPassword": "${POSTGRES_PASSWORD}",
+  "n8nStackName": "${N8N_STACK_NAME}",
+  "redisStackName": "${REDIS_STACK_NAME}",
+  "postgresStackName": "${PG_STACK_NAME}",
+  "databaseUri": "postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/n8n_queue${SUFFIX}"
+}
+EOF
+
+echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/n8n${SUFFIX}_output.json${RESET}"
+
+# Enviar dados para o webhook
+echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
+WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
+  -H "Content-Type: application/json" \
+  -d "${WEBHOOK_DATA}" \
+  -w "\n%{http_code}")
+
+HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
+WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
+    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
+else
+    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
+    echo "Resposta: ${WEBHOOK_BODY}"
+fi
+
+echo "---------------------------------------------"
+echo -e "${VERDE}[ n8n - INSTALAÇÃO COMPLETA ]${RESET}"
+echo -e "${VERDE}Editor URL:${RESET} https://${N8N_EDITOR_DOMAIN}"
+echo -e "${VERDE}Webhook URL:${RESET} https://${N8N_WEBHOOK_DOMAIN}"
+echo -e "${VERDE}Senha sugerida:${RESET} ${N8N_SUGGESTED_PASSWORD}"
+echo -e "${VERDE}Encryption Key:${RESET} ${N8N_ENCRYPTION_KEY}"
+echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
+echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${N8N_STACK_NAME}${RESET}"
+echo -e "${VERDE}Acesse seu n8n através do endereço:${RESET} https://${N8N_EDITOR_DOMAIN}"
+echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
