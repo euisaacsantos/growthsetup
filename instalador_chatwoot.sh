@@ -209,7 +209,8 @@ services:
         max_attempts: 3
       labels:
         - traefik.enable=true
-        - traefik.http.routers.chatwoot_app${SUFFIX}.rule=Host(\`${CHATWOOT_DOMAIN}\`)
+        - traefik.docker.network=${NETWORK_NAME}
+        - "traefik.http.routers.chatwoot_app${SUFFIX}.rule=Host(\`${CHATWOOT_DOMAIN}\`)"
         - traefik.http.routers.chatwoot_app${SUFFIX}.entrypoints=websecure
         - traefik.http.routers.chatwoot_app${SUFFIX}.tls=true
         - traefik.http.routers.chatwoot_app${SUFFIX}.tls.certresolver=letsencryptresolver
@@ -531,6 +532,42 @@ if [ $? -ne 0 ]; then
     error_exit "Falha ao implementar a stack Chatwoot."
 fi
 
+# Aguardar a inicialização do container do Chatwoot
+echo -e "${VERDE}Aguardando 30 segundos para inicialização do Chatwoot...${RESET}"
+sleep 30
+
+# Executar o comando para preparar o banco de dados do Chatwoot
+echo -e "${VERDE}Preparando o banco de dados do Chatwoot...${RESET}"
+# Tentar encontrar o container do Chatwoot app
+CHATWOOT_CONTAINER=$(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app)
+
+if [ -z "$CHATWOOT_CONTAINER" ]; then
+    echo -e "${AMARELO}Não foi possível encontrar o container do Chatwoot app, tentando novamente após 15 segundos...${RESET}"
+    sleep 15
+    CHATWOOT_CONTAINER=$(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app)
+    
+    if [ -z "$CHATWOOT_CONTAINER" ]; then
+        echo -e "${VERMELHO}Não foi possível encontrar o container do Chatwoot app.${RESET}"
+        echo -e "${AMARELO}Após a instalação, você precisará executar manualmente o seguinte comando:${RESET}"
+        echo -e "docker exec -it \$(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app) bundle exec rails db:chatwoot_prepare"
+    fi
+else
+    # Executar o comando de preparação do banco de dados
+    echo -e "${VERDE}Executando comando de preparação do banco de dados...${RESET}"
+    DB_PREPARE_OUTPUT=$(docker exec -it $CHATWOOT_CONTAINER bundle exec rails db:chatwoot_prepare 2>&1)
+    DB_PREPARE_STATUS=$?
+    
+    if [ $DB_PREPARE_STATUS -eq 0 ]; then
+        echo -e "${VERDE}Banco de dados do Chatwoot preparado com sucesso!${RESET}"
+    else
+        echo -e "${AMARELO}Houve um problema ao preparar o banco de dados do Chatwoot.${RESET}"
+        echo -e "${AMARELO}Saída do comando:${RESET}"
+        echo "$DB_PREPARE_OUTPUT"
+        echo -e "${AMARELO}Você pode tentar executar manualmente o seguinte comando:${RESET}"
+        echo -e "docker exec -it \$(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app) bundle exec rails db:chatwoot_prepare"
+    fi
+fi
+
 # Preparar os dados para o webhook
 timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 hostname=$(hostname)
@@ -613,17 +650,10 @@ else
     echo "Resposta: ${WEBHOOK_BODY}"
 fi
 
-# Instrução para inicializar o banco de dados do Chatwoot após a instalação
-echo -e "${VERDE}Instruções pós-instalação:${RESET}"
-echo -e "${BEGE}Para finalizar a configuração do Chatwoot, execute o seguinte comando no container chatwoot_app:${RESET}"
-echo -e "docker exec -it \$(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app) bundle exec rails db:chatwoot_prepare"
-echo -e "${BEGE}Após isso, acesse https://${CHATWOOT_DOMAIN} e crie sua conta de administrador.${RESET}"
-
 echo "---------------------------------------------"
 echo -e "${VERDE}[ Chatwoot - INSTALAÇÃO COMPLETA ]${RESET}"
 echo -e "${VERDE}URL:${RESET} https://${CHATWOOT_DOMAIN}"
 echo -e "${VERDE}Email do Admin:${RESET} ${CHATWOOT_ADMIN_EMAIL}"
-echo -e "${VERDE}Secret Key Base:${RESET} ${SECRET_KEY_BASE}"
 echo -e "${VERDE}PostgreSQL Password:${RESET} ${POSTGRES_PASSWORD}"
 echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
 echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
@@ -631,3 +661,10 @@ echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${CHATWOOT_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu Chatwoot através do endereço:${RESET} https://${CHATWOOT_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
+
+# Instrução final para criar conta de super admin
+echo -e "\n${VERDE}============== IMPORTANTE ==============\n${RESET}"
+echo -e "${BEGE}Após acessar o Chatwoot pela primeira vez, você pode criar uma conta super admin com o comando:${RESET}"
+echo -e "docker exec -it \$(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app) bundle exec rails c"
+echo -e "User.create!(name: \"Admin\", email: \"${CHATWOOT_ADMIN_EMAIL}\", password: \"sua_senha_forte\", role: 0, confirmed_at: Time.now.utc)"
+echo -e "\n${VERDE}============== IMPORTANTE ==============\n${RESET}"
