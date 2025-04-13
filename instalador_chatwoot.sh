@@ -549,12 +549,12 @@ if [ -z "$CHATWOOT_CONTAINER" ]; then
     if [ -z "$CHATWOOT_CONTAINER" ]; then
         echo -e "${VERMELHO}Não foi possível encontrar o container do Chatwoot app.${RESET}"
         echo -e "${AMARELO}Após a instalação, você precisará executar manualmente o seguinte comando:${RESET}"
-        echo -e "docker exec -it \$(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app) bundle exec rails db:chatwoot_prepare"
+        echo -e "docker exec $(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app) bundle exec rails db:chatwoot_prepare"
     fi
 else
-    # Executar o comando de preparação do banco de dados
+    # Executar o comando de preparação do banco de dados (sem a flag -it)
     echo -e "${VERDE}Executando comando de preparação do banco de dados...${RESET}"
-    DB_PREPARE_OUTPUT=$(docker exec -it $CHATWOOT_CONTAINER bundle exec rails db:chatwoot_prepare 2>&1)
+    DB_PREPARE_OUTPUT=$(docker exec $CHATWOOT_CONTAINER bundle exec rails db:chatwoot_prepare 2>&1)
     DB_PREPARE_STATUS=$?
     
     if [ $DB_PREPARE_STATUS -eq 0 ]; then
@@ -564,7 +564,7 @@ else
         echo -e "${AMARELO}Saída do comando:${RESET}"
         echo "$DB_PREPARE_OUTPUT"
         echo -e "${AMARELO}Você pode tentar executar manualmente o seguinte comando:${RESET}"
-        echo -e "docker exec -it \$(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app) bundle exec rails db:chatwoot_prepare"
+        echo -e "docker exec $(docker ps -q -f name=${CHATWOOT_STACK_NAME}_chatwoot_app) bundle exec rails db:chatwoot_prepare"
     fi
 fi
 
