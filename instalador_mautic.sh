@@ -1,14 +1,12 @@
 #!/bin/bash
 # Script para criar stacks para Mautic no Portainer (Mautic e MySQL)
-# Uso: ./script.sh <portainer_url> <mautic_domain> <portainer_password> <mautic_admin_email> [sufixo] [id-xxxx]
-# Exemplo: ./script.sh painel.trafegocomia.com mautic.growthtap.com.br senha123 admin@exemplo.com cliente1 id-12341221125
-# Sem sufixo: ./script.sh painel.trafegocomia.com mautic.growthtap.com.br senha123 admin@exemplo.com "" id-12341221125
+# Uso: curl -s -k https://raw.githubusercontent.com/euisaacsantos/growthsetup/refs/heads/main/instalador_mautic.sh | bash -s <portainer_url> <mautic_domain> <portainer_password> <mautic_admin_email> [sufixo] [id-xxxx]
+# Exemplo: curl -s -k https://raw.githubusercontent.com/euisaacsantos/growthsetup/refs/heads/main/instalador_mautic.sh | bash -s painel.trafegocomia.com mautic.growthtap.com.br senha123 admin@exemplo.com cliente1 id-12341221125
 
 # Verificar parâmetros obrigatórios
 if [ $# -lt 4 ]; then
-    echo "Uso: $0 <portainer_url> <mautic_domain> <portainer_password> <mautic_admin_email> [sufixo] [id-xxxx]"
-    echo "Exemplo: $0 painel.trafegocomia.com mautic.growthtap.com.br senha123 admin@exemplo.com cliente1 id-12341221125"
-    echo "Sem sufixo: $0 painel.trafegocomia.com mautic.growthtap.com.br senha123 admin@exemplo.com \"\" id-12341221125"
+    echo "Uso: curl -s -k https://raw.githubusercontent.com/euisaacsantos/growthsetup/refs/heads/main/instalador_mautic.sh | bash -s <portainer_url> <mautic_domain> <portainer_password> <mautic_admin_email> [sufixo] [id-xxxx]"
+    echo "Exemplo: curl -s -k https://raw.githubusercontent.com/euisaacsantos/growthsetup/refs/heads/main/instalador_mautic.sh | bash -s painel.trafegocomia.com mautic.growthtap.com.br senha123 admin@exemplo.com cliente1 id-12341221125"
     exit 1
 fi
 
