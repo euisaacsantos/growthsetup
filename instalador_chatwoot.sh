@@ -50,8 +50,9 @@ BEGE="\e[97m"
 
 # Gerar senhas seguras
 generate_valid_password() {
+    # Cria senha sem caracteres especiais que podem causar problemas no YAML
     local length=${1:-16}
-    local password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9!@#$%^&*()_+?><~' | fold -w ${length} | head -n 1)
+    local password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w ${length} | head -n 1)
     echo "$password"
 }
 
