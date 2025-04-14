@@ -20,6 +20,7 @@ WORDPRESS_ADMIN_EMAIL="$4"           # Email do administrador do WordPress
 SUFFIX=""
 INSTALLATION_ID="sem_id"
 WEBHOOK_URL="https://setup.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
+CURRENT_DIR=$(pwd)
 
 # Processar parâmetros opcionais (sufixo e ID)
 for param in "${@:5}"; do
@@ -74,7 +75,6 @@ error_exit() {
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
 docker volume create wordpress_data${SUFFIX} 2>/dev/null || echo "Volume wordpress_data${SUFFIX} já existe."
 docker volume create wordpress_db_data${SUFFIX} 2>/dev/null || echo "Volume wordpress_db_data${SUFFIX} já existe."
-docker volume create wordpress_config${SUFFIX} 2>/dev/null || echo "Volume wordpress_config${SUFFIX} já existe."
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 docker network inspect GrowthNet >/dev/null 2>&1 || {
@@ -126,10 +126,13 @@ networks:
     name: GrowthNet
 EOL
 
+# Criar diretório para configurações PHP
+echo -e "${VERDE}Criando diretório para configurações PHP...${RESET}"
+mkdir -p "${CURRENT_DIR}/uploads_conf"
+
 # Criar arquivo de configuração PHP para aumentar os limites de upload
 echo -e "${VERDE}Criando arquivo de configuração PHP para aumentar limites de upload...${RESET}"
-mkdir -p php_config
-cat > "php_config/uploads.ini" <<EOL
+cat > "${CURRENT_DIR}/uploads_conf/uploads.ini" <<EOL
 file_uploads = On
 memory_limit = 512M
 upload_max_filesize = 100M
@@ -150,12 +153,14 @@ services:
       - WORDPRESS_DB_USER=wordpress
       - WORDPRESS_DB_PASSWORD=${MYSQL_PASSWORD}
       - WORDPRESS_DB_NAME=wordpress
-      - WORDPRESS_TABLE_PREFIX=wp_
+      - WORDPRESS_CONFIG_EXTRA=define('WP_MEMORY_LIMIT', '256M');define('WP_MAX_MEMORY_LIMIT', '512M');
       - TZ=America/Sao_Paulo
     volumes:
       - wordpress_data${SUFFIX}:/var/www/html
-      - wordpress_config${SUFFIX}:/var/www/html/wp-content/uploads
-      - ./php_config/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini
+      - ${CURRENT_DIR}/uploads_conf/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini
+    configs:
+      - source: php_upload_config
+        target: /usr/local/etc/php/conf.d/uploads.ini
     networks:
       - GrowthNet
     deploy:
@@ -188,10 +193,12 @@ services:
         - traefik.http.services.wordpress${SUFFIX}.loadbalancer.server.port=80
         - traefik.http.services.wordpress${SUFFIX}.loadbalancer.passHostHeader=1
 
+configs:
+  php_upload_config:
+    file: ${CURRENT_DIR}/uploads_conf/uploads.ini
+
 volumes:
   wordpress_data${SUFFIX}:
-    external: true
-  wordpress_config${SUFFIX}:
     external: true
 
 networks:
@@ -304,6 +311,28 @@ fi
 
 echo -e "ID do Swarm: ${BEGE}${SWARM_ID}${RESET}"
 
+# Verificar permissões de arquivos
+echo -e "${VERDE}Verificando permissões dos arquivos de configuração...${RESET}"
+chmod 644 "${CURRENT_DIR}/uploads_conf/uploads.ini"
+ls -la "${CURRENT_DIR}/uploads_conf/"
+
+# Verificar se o diretório e arquivo existem antes de continuar
+if [ ! -f "${CURRENT_DIR}/uploads_conf/uploads.ini" ]; then
+    error_exit "O arquivo de configuração uploads.ini não foi criado corretamente. Verifique permissões."
+fi
+
+# Criar configuração Docker Swarm
+echo -e "${VERDE}Criando configuração Docker Swarm para uploads...${RESET}"
+cat "${CURRENT_DIR}/uploads_conf/uploads.ini" | docker config create php_upload_config${SUFFIX} - || {
+    echo -e "${AMARELO}Aviso: Configuração já existe ou não pôde ser criada. Tentando remover e recriar...${RESET}"
+    docker config rm php_upload_config${SUFFIX} 2>/dev/null
+    cat "${CURRENT_DIR}/uploads_conf/uploads.ini" | docker config create php_upload_config${SUFFIX} - || 
+        error_exit "Não foi possível criar a configuração Docker para uploads.ini"
+}
+
+# Atualizar o arquivo YAML para usar a configuração do Docker Swarm
+sed -i "s/source: php_upload_config/source: php_upload_config${SUFFIX}/g" "${WORDPRESS_STACK_NAME}.yaml"
+
 # Função para processar a criação ou atualização de uma stack
 process_stack() {
     local stack_name=$1
@@ -354,6 +383,15 @@ process_stack() {
     echo -e "${VERDE}Conteúdo do arquivo ${yaml_file}:${RESET}"
     cat "${yaml_file}"
     echo
+
+    # Método direto via Docker Swarm
+    echo -e "${VERDE}Tentando deploy direto via Docker Swarm para ${stack_name}...${RESET}"
+    if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
+        echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+        return 0
+    else
+        echo -e "${AMARELO}Tentativa direta falhou, tentando método via Portainer API...${RESET}"
+    fi
 
     # Criar arquivo temporário para capturar a saída de erro e a resposta
     erro_output=$(mktemp)
@@ -407,27 +445,20 @@ process_stack() {
             echo "Mensagem de erro: $(cat "$erro_output")"
             echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
             
-            # Último recurso - usar o Docker diretamente
-            echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
-            if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
-                echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
-                echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
-                return 0
-            else
+            # Último recurso - usar o Docker diretamente novamente com mais detalhes
+            echo -e "${AMARELO}Tentando deploy direto via Docker Swarm com detalhes...${RESET}"
+            docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}" --with-registry-auth || {
                 echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
                 return 1
-            fi
+            }
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+            return 0
         fi
     fi
 
     # Remove os arquivos temporários
     rm -f "$erro_output" "$response_output"
 }
-
-# Verificar se os arquivos de configuração estão presentes antes de continuar
-if [ ! -f "php_config/uploads.ini" ]; then
-    error_exit "O arquivo de configuração PHP não foi criado corretamente"
-fi
 
 # Implementar stacks na ordem correta: primeiro MySQL, depois WordPress
 echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
@@ -513,7 +544,8 @@ cat << EOF > /tmp/wordpress${SUFFIX}_output.json
   "mysqlWordPressPassword": "${MYSQL_PASSWORD}",
   "wordpressStackName": "${WORDPRESS_STACK_NAME}",
   "mysqlStackName": "${MYSQL_STACK_NAME}",
-  "databaseUri": "mysql://wordpress:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/wordpress"
+  "databaseUri": "mysql://wordpress:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/wordpress",
+  "phpUploadsConfig": "${CURRENT_DIR}/uploads_conf/uploads.ini"
 }
 EOF
 
@@ -536,17 +568,14 @@ else
     echo "Resposta: ${WEBHOOK_BODY}"
 fi
 
-# Adicionando verificação de logs em caso de falha
-echo -e "${VERDE}Verificando status do container WordPress...${RESET}"
-CONTAINER_ID=$(docker ps -q --filter name=${WORDPRESS_STACK_NAME})
+# Verificar status do container WordPress
+echo -e "${VERDE}Verificando status do WordPress...${RESET}"
+sleep 10  # Dar tempo para o container iniciar
+docker service ps ${WORDPRESS_STACK_NAME}_wordpress --no-trunc
 
-if [ -z "$CONTAINER_ID" ]; then
-    echo -e "${AMARELO}Container WordPress não encontrado ou não está rodando.${RESET}"
-    echo -e "${VERDE}Verificando logs do serviço...${RESET}"
-    docker service logs ${WORDPRESS_STACK_NAME}_wordpress --tail 50
-else
-    echo -e "${VERDE}Container WordPress está rodando com ID: ${CONTAINER_ID}${RESET}"
-fi
+# Exibir logs recentes do WordPress para diagnóstico
+echo -e "${VERDE}Logs recentes do WordPress:${RESET}"
+docker service logs ${WORDPRESS_STACK_NAME}_wordpress --tail 10
 
 echo "---------------------------------------------"
 echo -e "${VERDE}[ WordPress - INSTALAÇÃO COMPLETA ]${RESET}"
@@ -558,18 +587,13 @@ echo -e "  ${VERDE}Email do Admin:${RESET} ${WORDPRESS_ADMIN_EMAIL}"
 echo -e "  ${VERDE}Senha do Admin:${RESET} ${WORDPRESS_ADMIN_PASSWORD}"
 echo -e "${VERDE}MySQL Root Password:${RESET} ${MYSQL_ROOT_PASSWORD}"
 echo -e "${VERDE}MySQL WordPress Password:${RESET} ${MYSQL_PASSWORD}"
-echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
+echo -e "${VERDE}Stacks criadas com sucesso:${RESET}"
 echo -e "  - ${BEGE}${MYSQL_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${WORDPRESS_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu WordPress através do endereço:${RESET} https://${WORDPRESS_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo -e "${VERDE}O limite de upload de arquivos foi configurado para 100MB.${RESET}"
-
-# Instruções de diagnóstico
-echo -e "${AMARELO}Se o WordPress não estiver acessível, verifique:${RESET}"
-echo -e "1. ${BEGE}Status dos serviços:${RESET} docker service ls"
-echo -e "2. ${BEGE}Logs do WordPress:${RESET} docker service logs ${WORDPRESS_STACK_NAME}_wordpress"
-echo -e "3. ${BEGE}Logs do MySQL:${RESET} docker service logs ${MYSQL_STACK_NAME}_mysql"
-echo -e "4. ${BEGE}Testando conectividade:${RESET} docker exec -it $(docker ps -q --filter name=${WORDPRESS_STACK_NAME}) ping ${MYSQL_STACK_NAME}_mysql"
-echo -e "5. ${BEGE}Verificando permissões:${RESET} docker exec -it $(docker ps -q --filter name=${WORDPRESS_STACK_NAME}) ls -la /var/www/html"
-echo -e "${VERDE}Se precisar recriar as stacks, execute este script novamente.${RESET}"
+echo -e "${VERDE}Arquivo de configuração PHP:${RESET} ${CURRENT_DIR}/uploads_conf/uploads.ini"
+echo -e "${AMARELO}Nota: Se o WordPress não iniciar, verifique os logs com:${RESET}"
+echo -e "${BEGE}docker service logs ${WORDPRESS_STACK_NAME}_wordpress${RESET}"
+echo -e "${VERDE}
