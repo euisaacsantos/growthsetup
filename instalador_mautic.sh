@@ -1,5 +1,5 @@
 #!/bin/bash
-# Script para criar stacks para Mautic no Portainer (Mautic e MySQL)
+# Script para criar stacks para Mautic no Portainer (Mautic, MySQL e RabbitMQ)
 # Uso: curl -s -k https://raw.githubusercontent.com/euisaacsantos/growthsetup/refs/heads/main/instalador_mautic.sh | bash -s <portainer_url> <mautic_domain> <portainer_password> <mautic_admin_email> [sufixo] [id-xxxx]
 # Exemplo: curl -s -k https://raw.githubusercontent.com/euisaacsantos/growthsetup/refs/heads/main/instalador_mautic.sh | bash -s painel.trafegocomia.com mautic.growthtap.com.br senha123 admin@exemplo.com cliente1 id-12341221125
 
@@ -38,6 +38,7 @@ done
 PORTAINER_USER="admin"                   # Usuário do Portainer
 MAUTIC_STACK_NAME="mautic${SUFFIX}"      # Nome da stack Mautic
 MYSQL_STACK_NAME="mautic_mysql${SUFFIX}" # Nome da stack MySQL
+RABBITMQ_STACK_NAME="mautic_rabbitmq${SUFFIX}" # Nome da stack RabbitMQ
 
 # Cores para formatação
 AMARELO="\e[33m"
@@ -54,12 +55,15 @@ generate_valid_password() {
     echo "$password"
 }
 
-# Gerar senhas para MySQL e Mautic
+# Gerar senhas para MySQL, RabbitMQ e Mautic
 MYSQL_ROOT_PASSWORD=$(generate_valid_password 20)
 echo -e "${VERDE}Senha do MySQL Root gerada: ${RESET}${MYSQL_ROOT_PASSWORD}"
 
 MYSQL_PASSWORD=$(generate_valid_password 20)
 echo -e "${VERDE}Senha do usuário MySQL do Mautic gerada: ${RESET}${MYSQL_PASSWORD}"
+
+RABBITMQ_PASSWORD=$(generate_valid_password 20)
+echo -e "${VERDE}Senha do RabbitMQ gerada: ${RESET}${RABBITMQ_PASSWORD}"
 
 MAUTIC_ADMIN_PASSWORD=$(generate_valid_password 16)
 echo -e "${VERDE}Senha do admin do Mautic gerada: ${RESET}${MAUTIC_ADMIN_PASSWORD}"
@@ -74,6 +78,7 @@ error_exit() {
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
 docker volume create mautic_data${SUFFIX} 2>/dev/null || echo "Volume mautic_data${SUFFIX} já existe."
 docker volume create mautic_db_data${SUFFIX} 2>/dev/null || echo "Volume mautic_db_data${SUFFIX} já existe."
+docker volume create rabbitmq_data${SUFFIX} 2>/dev/null || echo "Volume rabbitmq_data${SUFFIX} já existe."
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 docker network inspect GrowthNet >/dev/null 2>&1 || {
@@ -125,6 +130,58 @@ networks:
     name: GrowthNet
 EOL
 
+# Criar arquivo docker-compose para a stack RabbitMQ
+echo -e "${VERDE}Criando arquivo docker-compose para a stack RabbitMQ...${RESET}"
+cat > "${RABBITMQ_STACK_NAME}.yaml" <<EOL
+version: '3.7'
+services:
+  rabbitmq:
+    image: rabbitmq:3.11-management
+    hostname: rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=mautic
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
+      - TZ=America/Sao_Paulo
+    volumes:
+      - rabbitmq_data${SUFFIX}:/var/lib/rabbitmq
+    networks:
+      - GrowthNet
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+        - node.role == manager
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=GrowthNet
+        - "traefik.http.routers.rabbitmq${SUFFIX}.rule=Host(\`rabbitmq.${MAUTIC_DOMAIN}\`)"
+        - traefik.http.routers.rabbitmq${SUFFIX}.entrypoints=websecure
+        - traefik.http.routers.rabbitmq${SUFFIX}.tls=true
+        - traefik.http.routers.rabbitmq${SUFFIX}.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.rabbitmq${SUFFIX}.priority=1
+        - traefik.http.routers.rabbitmq${SUFFIX}.service=rabbitmq${SUFFIX}
+        - traefik.http.services.rabbitmq${SUFFIX}.loadbalancer.server.port=15672
+        - traefik.http.services.rabbitmq${SUFFIX}.loadbalancer.passHostHeader=1
+
+volumes:
+  rabbitmq_data${SUFFIX}:
+    external: true
+
+networks:
+  GrowthNet:
+    external: true
+    name: GrowthNet
+EOL
+
 # Criar arquivo docker-compose para a stack Mautic
 echo -e "${VERDE}Criando arquivo docker-compose para a stack Mautic...${RESET}"
 cat > "${MAUTIC_STACK_NAME}.yaml" <<EOL
@@ -143,6 +200,11 @@ services:
       - PHP_MEMORY_LIMIT=512M
       - MAUTIC_ADMIN_EMAIL=${MAUTIC_ADMIN_EMAIL}
       - MAUTIC_ADMIN_PASSWORD=${MAUTIC_ADMIN_PASSWORD}
+      - RABBITMQ_HOST=${RABBITMQ_STACK_NAME}_rabbitmq
+      - RABBITMQ_USER=mautic
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - RABBITMQ_VHOST=/
+      - RABBITMQ_PORT=5672
       - TZ=America/Sao_Paulo
     volumes:
       - mautic_data${SUFFIX}:/var/www/html
@@ -175,6 +237,44 @@ services:
         - traefik.http.routers.mautic${SUFFIX}.service=mautic${SUFFIX}
         - traefik.http.services.mautic${SUFFIX}.loadbalancer.server.port=80
         - traefik.http.services.mautic${SUFFIX}.loadbalancer.passHostHeader=1
+
+  mautic-worker:
+    image: mautic/mautic:latest
+    networks:
+      - GrowthNet
+    environment:
+      - MAUTIC_DB_HOST=${MYSQL_STACK_NAME}_mysql
+      - MAUTIC_DB_USER=mautic
+      - MAUTIC_DB_PASSWORD=${MYSQL_PASSWORD}
+      - MAUTIC_DB_NAME=mautic
+      - PHP_MEMORY_LIMIT=512M
+      - RABBITMQ_HOST=${RABBITMQ_STACK_NAME}_rabbitmq
+      - RABBITMQ_USER=mautic
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - RABBITMQ_VHOST=/
+      - RABBITMQ_PORT=5672
+      - TZ=America/Sao_Paulo
+    volumes:
+      - mautic_data${SUFFIX}:/var/www/html
+    command: ["php", "/var/www/html/bin/console", "messenger:consume", "--time-limit=3600"]
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
 
 volumes:
   mautic_data${SUFFIX}:
@@ -410,7 +510,7 @@ process_stack() {
     rm -f "$erro_output" "$response_output"
 }
 
-# Implementar stacks na ordem correta: primeiro MySQL, depois Mautic
+# Implementar stacks na ordem correta: MySQL, RabbitMQ, depois Mautic
 echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
 
 # Processar MySQL primeiro
@@ -419,11 +519,17 @@ if [ $? -ne 0 ]; then
     echo -e "${AMARELO}Aviso: Problemas ao implementar MySQL, mas continuando...${RESET}"
 fi
 
-# Adicionar uma pausa para garantir que o MySQL seja inicializado
-echo -e "${VERDE}Aguardando 15 segundos para inicialização do MySQL...${RESET}"
+# Processar RabbitMQ segundo
+process_stack "$RABBITMQ_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar RabbitMQ, mas continuando...${RESET}"
+fi
+
+# Adicionar uma pausa para garantir que o MySQL e RabbitMQ sejam inicializados
+echo -e "${VERDE}Aguardando 15 segundos para inicialização do MySQL e RabbitMQ...${RESET}"
 sleep 15
 
-# Processar Mautic segundo (depende do MySQL)
+# Processar Mautic terceiro (depende do MySQL e RabbitMQ)
 process_stack "$MAUTIC_STACK_NAME"
 if [ $? -ne 0 ]; then
     error_exit "Falha ao implementar a stack Mautic."
@@ -446,10 +552,12 @@ WEBHOOK_DATA=$(cat << EOF
     "domain": "${MAUTIC_DOMAIN}",
     "admin_email": "${MAUTIC_ADMIN_EMAIL}",
     "admin_password": "${MAUTIC_ADMIN_PASSWORD}",
-    "database_uri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic"
+    "database_uri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
+    "rabbitmq_uri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
   },
   "stacks": {
     "mysql": "${MYSQL_STACK_NAME}",
+    "rabbitmq": "${RABBITMQ_STACK_NAME}",
     "mautic": "${MAUTIC_STACK_NAME}"
   },
   "suffix": "${SUFFIX}"
@@ -470,7 +578,11 @@ Email do Admin: ${MAUTIC_ADMIN_EMAIL}
 Senha do Admin: ${MAUTIC_ADMIN_PASSWORD}
 MySQL Root Password: ${MYSQL_ROOT_PASSWORD}
 MySQL Mautic Password: ${MYSQL_PASSWORD}
+RabbitMQ Password: ${RABBITMQ_PASSWORD}
+RabbitMQ Admin URL: https://rabbitmq.${MAUTIC_DOMAIN}
+RabbitMQ Username: mautic
 Database: mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic
+RabbitMQ: amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F
 EOF
     chmod 600 "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt"
     echo -e "${VERDE}Credenciais do Mautic salvas em ${CREDENTIALS_DIR}/mautic${SUFFIX}.txt${RESET}"
@@ -486,9 +598,13 @@ cat << EOF > /tmp/mautic${SUFFIX}_output.json
   "adminPassword": "${MAUTIC_ADMIN_PASSWORD}",
   "mysqlRootPassword": "${MYSQL_ROOT_PASSWORD}",
   "mysqlMauticPassword": "${MYSQL_PASSWORD}",
+  "rabbitmqPassword": "${RABBITMQ_PASSWORD}",
+  "rabbitmqUrl": "https://rabbitmq.${MAUTIC_DOMAIN}",
   "mauticStackName": "${MAUTIC_STACK_NAME}",
   "mysqlStackName": "${MYSQL_STACK_NAME}",
-  "databaseUri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic"
+  "rabbitmqStackName": "${RABBITMQ_STACK_NAME}",
+  "databaseUri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
+  "rabbitmqUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
 }
 EOF
 
@@ -518,8 +634,13 @@ echo -e "${VERDE}Email do Admin:${RESET} ${MAUTIC_ADMIN_EMAIL}"
 echo -e "${VERDE}Senha do Admin:${RESET} ${MAUTIC_ADMIN_PASSWORD}"
 echo -e "${VERDE}MySQL Root Password:${RESET} ${MYSQL_ROOT_PASSWORD}"
 echo -e "${VERDE}MySQL Mautic Password:${RESET} ${MYSQL_PASSWORD}"
+echo -e "${VERDE}RabbitMQ Password:${RESET} ${RABBITMQ_PASSWORD}"
+echo -e "${VERDE}RabbitMQ Admin URL:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
+echo -e "${VERDE}RabbitMQ Username:${RESET} mautic"
 echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
 echo -e "  - ${BEGE}${MYSQL_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${RABBITMQ_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${MAUTIC_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu Mautic através do endereço:${RESET} https://${MAUTIC_DOMAIN}"
+echo -e "${VERDE}Acesse o painel do RabbitMQ em:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
