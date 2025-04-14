@@ -74,6 +74,7 @@ error_exit() {
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
 docker volume create wordpress_data${SUFFIX} 2>/dev/null || echo "Volume wordpress_data${SUFFIX} já existe."
 docker volume create wordpress_db_data${SUFFIX} 2>/dev/null || echo "Volume wordpress_db_data${SUFFIX} já existe."
+docker volume create wordpress_config${SUFFIX} 2>/dev/null || echo "Volume wordpress_config${SUFFIX} já existe."
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 docker network inspect GrowthNet >/dev/null 2>&1 || {
@@ -89,7 +90,7 @@ version: '3.7'
 services:
   mysql:
     image: mysql:8.0
-    command: --default-authentication-plugin=mysql_native_password
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
       - MYSQL_DATABASE=wordpress
@@ -125,6 +126,18 @@ networks:
     name: GrowthNet
 EOL
 
+# Criar arquivo de configuração PHP para aumentar os limites de upload
+echo -e "${VERDE}Criando arquivo de configuração PHP para aumentar limites de upload...${RESET}"
+mkdir -p php_config
+cat > "php_config/uploads.ini" <<EOL
+file_uploads = On
+memory_limit = 512M
+upload_max_filesize = 100M
+post_max_size = 100M
+max_execution_time = 600
+max_input_time = 600
+EOL
+
 # Criar arquivo docker-compose para a stack WordPress
 echo -e "${VERDE}Criando arquivo docker-compose para a stack WordPress...${RESET}"
 cat > "${WORDPRESS_STACK_NAME}.yaml" <<EOL
@@ -137,16 +150,12 @@ services:
       - WORDPRESS_DB_USER=wordpress
       - WORDPRESS_DB_PASSWORD=${MYSQL_PASSWORD}
       - WORDPRESS_DB_NAME=wordpress
-      - WORDPRESS_CONFIG_EXTRA=
-          define('WP_MEMORY_LIMIT', '256M');
-          define('WP_MAX_MEMORY_LIMIT', '512M');
-          define('CONCATENATE_SCRIPTS', false);
-          define('AUTOSAVE_INTERVAL', 300);
-          define('WP_POST_REVISIONS', 5);
+      - WORDPRESS_TABLE_PREFIX=wp_
       - TZ=America/Sao_Paulo
     volumes:
       - wordpress_data${SUFFIX}:/var/www/html
-      - ./uploads.ini:/usr/local/etc/php/conf.d/uploads.ini
+      - wordpress_config${SUFFIX}:/var/www/html/wp-content/uploads
+      - ./php_config/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini
     networks:
       - GrowthNet
     deploy:
@@ -182,22 +191,13 @@ services:
 volumes:
   wordpress_data${SUFFIX}:
     external: true
+  wordpress_config${SUFFIX}:
+    external: true
 
 networks:
   GrowthNet:
     external: true
     name: GrowthNet
-EOL
-
-# Criar arquivo de configuração PHP para aumentar os limites de upload
-echo -e "${VERDE}Criando arquivo de configuração PHP para aumentar limites de upload...${RESET}"
-cat > "uploads.ini" <<EOL
-file_uploads = On
-memory_limit = 512M
-upload_max_filesize = 100M
-post_max_size = 100M
-max_execution_time = 600
-max_input_time = 600
 EOL
 
 # Verificar se jq está instalado
@@ -424,6 +424,11 @@ process_stack() {
     rm -f "$erro_output" "$response_output"
 }
 
+# Verificar se os arquivos de configuração estão presentes antes de continuar
+if [ ! -f "php_config/uploads.ini" ]; then
+    error_exit "O arquivo de configuração PHP não foi criado corretamente"
+fi
+
 # Implementar stacks na ordem correta: primeiro MySQL, depois WordPress
 echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
 
@@ -531,6 +536,18 @@ else
     echo "Resposta: ${WEBHOOK_BODY}"
 fi
 
+# Adicionando verificação de logs em caso de falha
+echo -e "${VERDE}Verificando status do container WordPress...${RESET}"
+CONTAINER_ID=$(docker ps -q --filter name=${WORDPRESS_STACK_NAME})
+
+if [ -z "$CONTAINER_ID" ]; then
+    echo -e "${AMARELO}Container WordPress não encontrado ou não está rodando.${RESET}"
+    echo -e "${VERDE}Verificando logs do serviço...${RESET}"
+    docker service logs ${WORDPRESS_STACK_NAME}_wordpress --tail 50
+else
+    echo -e "${VERDE}Container WordPress está rodando com ID: ${CONTAINER_ID}${RESET}"
+fi
+
 echo "---------------------------------------------"
 echo -e "${VERDE}[ WordPress - INSTALAÇÃO COMPLETA ]${RESET}"
 echo -e "${VERDE}URL:${RESET} https://${WORDPRESS_DOMAIN}"
@@ -547,3 +564,12 @@ echo -e "  - ${BEGE}${WORDPRESS_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu WordPress através do endereço:${RESET} https://${WORDPRESS_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo -e "${VERDE}O limite de upload de arquivos foi configurado para 100MB.${RESET}"
+
+# Instruções de diagnóstico
+echo -e "${AMARELO}Se o WordPress não estiver acessível, verifique:${RESET}"
+echo -e "1. ${BEGE}Status dos serviços:${RESET} docker service ls"
+echo -e "2. ${BEGE}Logs do WordPress:${RESET} docker service logs ${WORDPRESS_STACK_NAME}_wordpress"
+echo -e "3. ${BEGE}Logs do MySQL:${RESET} docker service logs ${MYSQL_STACK_NAME}_mysql"
+echo -e "4. ${BEGE}Testando conectividade:${RESET} docker exec -it $(docker ps -q --filter name=${WORDPRESS_STACK_NAME}) ping ${MYSQL_STACK_NAME}_mysql"
+echo -e "5. ${BEGE}Verificando permissões:${RESET} docker exec -it $(docker ps -q --filter name=${WORDPRESS_STACK_NAME}) ls -la /var/www/html"
+echo -e "${VERDE}Se precisar recriar as stacks, execute este script novamente.${RESET}"
