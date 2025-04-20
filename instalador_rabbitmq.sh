@@ -85,6 +85,9 @@ services:
   rabbitmq:
     image: rabbitmq:3.12-management
     hostname: rabbitmq-server
+    ports:
+      - 15672:15672  # Interface de gerenciamento
+      - 5672:5672    # Conexão AMQP
     environment:
       - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_ADMIN_PASSWORD}
@@ -285,6 +288,15 @@ process_stack() {
     cat "${yaml_file}"
     echo
 
+    # Método direto via Docker Swarm
+    echo -e "${VERDE}Tentando deploy direto via Docker Swarm...${RESET}"
+    if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
+        echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+        return 0
+    fi
+    
+    echo -e "${AMARELO}Deploy via Docker Swarm falhou, tentando via API Portainer...${RESET}"
+
     # Criar arquivo temporário para capturar a saída de erro e a resposta
     erro_output=$(mktemp)
     response_output=$(mktemp)
@@ -333,19 +345,8 @@ process_stack() {
             echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
             return 0
         else
-            echo -e "${VERMELHO}Erro ao efetuar deploy pelo método alternativo. Resposta HTTP: ${http_code}${RESET}"
-            echo "Mensagem de erro: $(cat "$erro_output")"
-            echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
-            
-            # Último recurso - usar o Docker diretamente
-            echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
-            if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
-                echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
-                return 0
-            else
-                echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
-                return 1
-            fi
+            echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
+            return 1
         fi
     fi
 
@@ -413,7 +414,8 @@ cat << EOF > /tmp/rabbitmq${SUFFIX}_output.json
   "adminUser": "${RABBITMQ_DEFAULT_USER}",
   "adminPassword": "${RABBITMQ_ADMIN_PASSWORD}",
   "rabbitmqStackName": "${RABBITMQ_STACK_NAME}",
-  "amqpUri": "amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
+  "amqpUri": "amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F",
+  "directUrl": "http://${server_ip}:15672"
 }
 EOF
 
@@ -443,6 +445,7 @@ docker service ps ${RABBITMQ_STACK_NAME}_rabbitmq --no-trunc
 echo "---------------------------------------------"
 echo -e "${VERDE}[ RabbitMQ - INSTALAÇÃO COMPLETA ]${RESET}"
 echo -e "${VERDE}URL:${RESET} https://${RABBITMQ_DOMAIN}"
+echo -e "${VERDE}URL Direta:${RESET} http://${server_ip}:15672"
 echo -e "${VERDE}Credenciais de acesso ao painel:${RESET}"
 echo -e "  ${VERDE}Usuário:${RESET} ${RABBITMQ_DEFAULT_USER}"
 echo -e "  ${VERDE}Senha:${RESET} ${RABBITMQ_ADMIN_PASSWORD}"
@@ -450,12 +453,13 @@ echo -e "${VERDE}AMQP URI:${RESET} amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_AD
 echo -e "${VERDE}Stack criada com sucesso:${RESET}"
 echo -e "  - ${BEGE}${RABBITMQ_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse o painel do RabbitMQ através do endereço:${RESET} https://${RABBITMQ_DOMAIN}"
+echo -e "${VERDE}Ou diretamente via:${RESET} http://${server_ip}:15672"
 echo -e "${VERDE}A stack está disponível e editável no Portainer.${RESET}"
 
 # Instruções adicionais para uso do RabbitMQ
 echo -e "${VERDE}Portas padrão do RabbitMQ:${RESET}"
 echo -e "  - ${BEGE}5672:${RESET} AMQP 0-9-1 e 1.0 (principal)"
-echo -e "  - ${BEGE}15672:${RESET} Interface de gerenciamento HTTP (em uso)"
+echo -e "  - ${BEGE}15672:${RESET} Interface de gerenciamento HTTP (exposta diretamente)"
 echo -e "  - ${BEGE}15692:${RESET} Prometheus metrics"
 echo -e "${VERDE}Para conectar aplicações, use a URI:${RESET}"
 echo -e "${BEGE}amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F${RESET}"
