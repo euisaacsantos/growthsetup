@@ -87,6 +87,29 @@ docker network inspect GrowthNet >/dev/null 2>&1 || {
     docker network create --driver overlay --attachable GrowthNet
 }
 
+# Criar arquivo de crontab para o Mautic
+echo -e "${VERDE}Criando arquivo de crontab para o Mautic...${RESET}"
+mkdir -p cron_files
+cat > "cron_files/mautic_cron${SUFFIX}" <<EOL
+# Mautic cron jobs for proper operation
+# Run lead list updates every 15 minutes
+*/15 * * * * php /var/www/html/bin/console mautic:segments:update --env=prod
+# Rebuild lead lists once per day at 5 AM
+0 5 * * * php /var/www/html/bin/console mautic:segments:rebuild --env=prod
+# Run campaign triggers every 5 minutes
+*/5 * * * * php /var/www/html/bin/console mautic:campaigns:trigger --env=prod
+# Rebuild campaigns once per day at 4 AM
+0 4 * * * php /var/www/html/bin/console mautic:campaigns:rebuild --env=prod
+# Send scheduled broadcasts and campaign emails every 15 minutes
+*/15 * * * * php /var/www/html/bin/console mautic:emails:send --env=prod
+# Send scheduled reports every hour
+0 * * * * php /var/www/html/bin/console mautic:reports:scheduler --env=prod
+# Process webhooks every 15 minutes
+*/15 * * * * php /var/www/html/bin/console mautic:webhooks:process --env=prod
+# General cache clearing and maintenance
+0 1 * * * php /var/www/html/bin/console mautic:maintenance:cleanup --days-old=365 --env=prod
+EOL
+
 # Criar arquivo docker-compose para a stack MySQL
 echo -e "${VERDE}Criando arquivo docker-compose para a stack MySQL...${RESET}"
 cat > "${MYSQL_STACK_NAME}.yaml" <<EOL
@@ -94,7 +117,9 @@ version: '3.7'
 services:
   mysql:
     image: mysql:8.0
-    command: --default-authentication-plugin=mysql_native_password
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
       - MYSQL_DATABASE=mautic
@@ -138,6 +163,9 @@ services:
   rabbitmq:
     image: rabbitmq:3.11-management
     hostname: rabbitmq
+    ports:
+      - "5672:5672"   # AMQP protocol port
+      - "15672:15672" # Management UI port
     environment:
       - RABBITMQ_DEFAULT_USER=mautic
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
@@ -196,7 +224,7 @@ services:
       - MAUTIC_DB_USER=mautic
       - MAUTIC_DB_PASSWORD=${MYSQL_PASSWORD}
       - MAUTIC_DB_NAME=mautic
-      - MAUTIC_RUN_CRON_JOBS=true
+      - MAUTIC_RUN_CRON_JOBS=false
       - PHP_MEMORY_LIMIT=512M
       - MAUTIC_ADMIN_EMAIL=${MAUTIC_ADMIN_EMAIL}
       - MAUTIC_ADMIN_PASSWORD=${MAUTIC_ADMIN_PASSWORD}
@@ -208,6 +236,7 @@ services:
       - TZ=America/Sao_Paulo
     volumes:
       - mautic_data${SUFFIX}:/var/www/html
+      - ./cron_files/mautic_cron${SUFFIX}:/etc/cron.d/mautic
     deploy:
       mode: replicated
       replicas: 1
@@ -256,7 +285,7 @@ services:
       - TZ=America/Sao_Paulo
     volumes:
       - mautic_data${SUFFIX}:/var/www/html
-    command: ["php", "/var/www/html/bin/console", "messenger:consume", "--time-limit=3600"]
+    command: ["php", "/var/www/html/bin/console", "messenger:consume", "async", "--time-limit=3600"]
     deploy:
       mode: replicated
       replicas: 1
@@ -267,6 +296,54 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+
+  mautic-cron:
+    image: mautic/mautic:latest
+    networks:
+      - GrowthNet
+    environment:
+      - MAUTIC_DB_HOST=${MYSQL_STACK_NAME}_mysql
+      - MAUTIC_DB_USER=mautic
+      - MAUTIC_DB_PASSWORD=${MYSQL_PASSWORD}
+      - MAUTIC_DB_NAME=mautic
+      - PHP_MEMORY_LIMIT=512M
+      - RABBITMQ_HOST=${RABBITMQ_STACK_NAME}_rabbitmq
+      - RABBITMQ_USER=mautic
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD}
+      - RABBITMQ_VHOST=/
+      - RABBITMQ_PORT=5672
+      - TZ=America/Sao_Paulo
+    volumes:
+      - mautic_data${SUFFIX}:/var/www/html
+    entrypoint: |
+      bash -c '
+      apt-get update && apt-get install -y cron
+      chmod 0644 /etc/cron.d/mautic
+      crontab /etc/cron.d/mautic
+      touch /var/log/cron.log
+      cron -f
+      '
+    volumes:
+      - mautic_data${SUFFIX}:/var/www/html
+      - ./cron_files/mautic_cron${SUFFIX}:/etc/cron.d/mautic
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 256M
       update_config:
         parallelism: 1
         delay: 10s
@@ -445,8 +522,10 @@ process_stack() {
     erro_output=$(mktemp)
     response_output=$(mktemp)
 
+    # PRIMEIRO: Tentar via API do Portainer para manter a stack editável
+    echo -e "${VERDE}Tentando deploy via API Portainer...${RESET}"
+    
     # Enviar a stack usando o endpoint multipart do Portainer
-    echo -e "${VERDE}Enviando a stack ${stack_name} para o Portainer...${RESET}"
     http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
       -H "Authorization: Bearer ${JWT_TOKEN}" \
       -F "Name=${stack_name}" \
@@ -600,11 +679,14 @@ cat << EOF > /tmp/mautic${SUFFIX}_output.json
   "mysqlMauticPassword": "${MYSQL_PASSWORD}",
   "rabbitmqPassword": "${RABBITMQ_PASSWORD}",
   "rabbitmqUrl": "https://rabbitmq.${MAUTIC_DOMAIN}",
+  "rabbitmqDirectUrl": "http://${server_ip}:15672",
   "mauticStackName": "${MAUTIC_STACK_NAME}",
   "mysqlStackName": "${MYSQL_STACK_NAME}",
   "rabbitmqStackName": "${RABBITMQ_STACK_NAME}",
   "databaseUri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
-  "rabbitmqUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
+  "databaseDirectUri": "mysql://mautic:${MYSQL_PASSWORD}@${server_ip}:3306/mautic",
+  "rabbitmqUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F",
+  "rabbitmqDirectUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${server_ip}:5672/%2F"
 }
 EOF
 
@@ -627,6 +709,12 @@ else
     echo "Resposta: ${WEBHOOK_BODY}"
 fi
 
+# Verificar status dos serviços
+echo -e "${VERDE}Verificando status do Mautic...${RESET}"
+docker service ps ${MAUTIC_STACK_NAME}_mautic --no-trunc
+docker service ps ${MAUTIC_STACK_NAME}_mautic-worker --no-trunc
+docker service ps ${MAUTIC_STACK_NAME}_mautic-cron --no-trunc
+
 echo "---------------------------------------------"
 echo -e "${VERDE}[ Mautic - INSTALAÇÃO COMPLETA ]${RESET}"
 echo -e "${VERDE}URL:${RESET} https://${MAUTIC_DOMAIN}"
@@ -636,11 +724,14 @@ echo -e "${VERDE}MySQL Root Password:${RESET} ${MYSQL_ROOT_PASSWORD}"
 echo -e "${VERDE}MySQL Mautic Password:${RESET} ${MYSQL_PASSWORD}"
 echo -e "${VERDE}RabbitMQ Password:${RESET} ${RABBITMQ_PASSWORD}"
 echo -e "${VERDE}RabbitMQ Admin URL:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
+echo -e "${VERDE}RabbitMQ Direct URL:${RESET} http://${server_ip}:15672"
 echo -e "${VERDE}RabbitMQ Username:${RESET} mautic"
-echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
+echo -e "${VERDE}Stacks criadas com sucesso:${RESET}"
 echo -e "  - ${BEGE}${MYSQL_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${RABBITMQ_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${MAUTIC_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu Mautic através do endereço:${RESET} https://${MAUTIC_DOMAIN}"
 echo -e "${VERDE}Acesse o painel do RabbitMQ em:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
+echo -e "${VERDE}Ou diretamente via:${RESET} http://${server_ip}:15672"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
+echo -e "${VERDE}Cron jobs configurados para atualização automática de segmentos e campanhas.${RESET}"
