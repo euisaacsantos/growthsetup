@@ -87,28 +87,56 @@ docker network inspect GrowthNet >/dev/null 2>&1 || {
     docker network create --driver overlay --attachable GrowthNet
 }
 
-# Criar arquivo de crontab para o Mautic
-echo -e "${VERDE}Criando arquivo de crontab para o Mautic...${RESET}"
-mkdir -p cron_files
-cat > "cron_files/mautic_cron${SUFFIX}" <<EOL
-# Mautic cron jobs for proper operation
-# Run lead list updates every 15 minutes
-*/15 * * * * php /var/www/html/bin/console mautic:segments:update --env=prod
-# Rebuild lead lists once per day at 5 AM
-0 5 * * * php /var/www/html/bin/console mautic:segments:rebuild --env=prod
-# Run campaign triggers every 5 minutes
-*/5 * * * * php /var/www/html/bin/console mautic:campaigns:trigger --env=prod
-# Rebuild campaigns once per day at 4 AM
-0 4 * * * php /var/www/html/bin/console mautic:campaigns:rebuild --env=prod
-# Send scheduled broadcasts and campaign emails every 15 minutes
-*/15 * * * * php /var/www/html/bin/console mautic:emails:send --env=prod
-# Send scheduled reports every hour
-0 * * * * php /var/www/html/bin/console mautic:reports:scheduler --env=prod
-# Process webhooks every 15 minutes
-*/15 * * * * php /var/www/html/bin/console mautic:webhooks:process --env=prod
-# General cache clearing and maintenance
-0 1 * * * php /var/www/html/bin/console mautic:maintenance:cleanup --days-old=365 --env=prod
+# Criar diretório para scripts auxiliares
+echo -e "${VERDE}Criando diretório para scripts auxiliares...${RESET}"
+mkdir -p mautic_scripts${SUFFIX}
+
+# Criar script para executar cron jobs
+echo -e "${VERDE}Criando script para cron jobs...${RESET}"
+cat > "mautic_scripts${SUFFIX}/run_mautic_crons.sh" <<EOL
+#!/bin/bash
+# Script para executar os comandos cron do Mautic
+
+# Atualizar segmentos (listas de leads)
+echo "Executando: mautic:segments:update"
+php /var/www/html/bin/console mautic:segments:update --env=prod
+
+# Disparar campanhas
+echo "Executando: mautic:campaigns:trigger"
+php /var/www/html/bin/console mautic:campaigns:trigger --env=prod
+
+# Enviar emails
+echo "Executando: mautic:emails:send"
+php /var/www/html/bin/console mautic:emails:send --env=prod
+
+# Processar webhooks
+echo "Executando: mautic:webhooks:process"
+php /var/www/html/bin/console mautic:webhooks:process --env=prod
+
+# A cada dia (verificar se é meia-noite)
+HOUR=\$(date +%H)
+if [ "\$HOUR" = "00" ]; then
+    echo "Executando tarefas diárias..."
+    
+    # Reconstruir segmentos
+    echo "Executando: mautic:segments:rebuild"
+    php /var/www/html/bin/console mautic:segments:rebuild --env=prod
+    
+    # Reconstruir campanhas
+    echo "Executando: mautic:campaigns:rebuild"
+    php /var/www/html/bin/console mautic:campaigns:rebuild --env=prod
+    
+    # Limpeza de manutenção
+    echo "Executando: mautic:maintenance:cleanup"
+    php /var/www/html/bin/console mautic:maintenance:cleanup --days-old=365 --env=prod
+fi
+
+# Sucesso
+echo "Cron jobs do Mautic executados com sucesso em \$(date)"
 EOL
+
+# Dar permissão de execução ao script
+chmod +x "mautic_scripts${SUFFIX}/run_mautic_crons.sh"
 
 # Criar arquivo docker-compose para a stack MySQL
 echo -e "${VERDE}Criando arquivo docker-compose para a stack MySQL...${RESET}"
@@ -236,7 +264,6 @@ services:
       - TZ=America/Sao_Paulo
     volumes:
       - mautic_data${SUFFIX}:/var/www/html
-      - ./cron_files/mautic_cron${SUFFIX}:/etc/cron.d/mautic
     deploy:
       mode: replicated
       replicas: 1
@@ -285,7 +312,7 @@ services:
       - TZ=America/Sao_Paulo
     volumes:
       - mautic_data${SUFFIX}:/var/www/html
-    command: ["php", "/var/www/html/bin/console", "messenger:consume", "async", "--time-limit=3600"]
+    command: ["php", "/var/www/html/bin/console", "messenger:consume", "email", "hit", "failed", "--time-limit=3600"]
     deploy:
       mode: replicated
       replicas: 1
@@ -323,17 +350,17 @@ services:
       - TZ=America/Sao_Paulo
     volumes:
       - mautic_data${SUFFIX}:/var/www/html
+      - ./mautic_scripts${SUFFIX}/run_mautic_crons.sh:/usr/local/bin/run_mautic_crons.sh
     entrypoint: |
       bash -c '
+      echo "* * * * * /usr/local/bin/run_mautic_crons.sh >> /var/log/cron.log 2>&1" > /etc/cron.d/mautic-cron
+      chmod 644 /etc/cron.d/mautic-cron
       apt-get update && apt-get install -y cron
-      chmod 0644 /etc/cron.d/mautic
-      crontab /etc/cron.d/mautic
+      crontab /etc/cron.d/mautic-cron
       touch /var/log/cron.log
-      cron -f
+      echo "Iniciando cron para Mautic..."
+      cron && tail -f /var/log/cron.log
       '
-    volumes:
-      - mautic_data${SUFFIX}:/var/www/html
-      - ./cron_files/mautic_cron${SUFFIX}:/etc/cron.d/mautic
     deploy:
       mode: replicated
       replicas: 1
@@ -539,32 +566,6 @@ process_stack() {
     if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
         # Verifica o conteúdo da resposta para garantir que o deploy foi bem-sucedido
         if echo "$response_body" | grep -q "\"Id\""; then
-            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso!${RESET}"
-            return 0
-        else
-            echo -e "${VERMELHO}Erro, resposta inesperada do servidor ao tentar efetuar deploy da stack ${BEGE}${stack_name}${RESET}.${RESET}"
-            echo "Resposta do servidor: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
-        fi
-    else
-        echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
-        echo "Mensagem de erro: $(cat "$erro_output")"
-        echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
-        
-        # Tentar método alternativo se falhar
-        echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
-        # Tenta com outro endpoint do Portainer (método 2)
-        http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
-          -H "Authorization: Bearer ${JWT_TOKEN}" \
-          -H "Content-Type: multipart/form-data" \
-          -F "Name=${stack_name}" \
-          -F "file=@$(pwd)/${yaml_file}" \
-          -F "SwarmID=${SWARM_ID}" \
-          -F "endpointId=${ENDPOINT_ID}" \
-          "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
-        
-        response_body=$(cat "$response_output")
-        
-        if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
             echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
             return 0
         else
@@ -712,8 +713,8 @@ fi
 # Verificar status dos serviços
 echo -e "${VERDE}Verificando status do Mautic...${RESET}"
 docker service ps ${MAUTIC_STACK_NAME}_mautic --no-trunc
-docker service ps ${MAUTIC_STACK_NAME}_mautic-worker --no-trunc
-docker service ps ${MAUTIC_STACK_NAME}_mautic-cron --no-trunc
+docker service ps ${MAUTIC_STACK_NAME}_mautic-worker --no-trunc || echo "Serviço mautic-worker ainda não disponível"
+docker service ps ${MAUTIC_STACK_NAME}_mautic-cron --no-trunc || echo "Serviço mautic-cron ainda não disponível"
 
 echo "---------------------------------------------"
 echo -e "${VERDE}[ Mautic - INSTALAÇÃO COMPLETA ]${RESET}"
@@ -733,5 +734,41 @@ echo -e "  - ${BEGE}${MAUTIC_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse seu Mautic através do endereço:${RESET} https://${MAUTIC_DOMAIN}"
 echo -e "${VERDE}Acesse o painel do RabbitMQ em:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
 echo -e "${VERDE}Ou diretamente via:${RESET} http://${server_ip}:15672"
-echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
-echo -e "${VERDE}Cron jobs configurados para atualização automática de segmentos e campanhas.${RESET}"
+
+echo -e "\n${VERDE}=== Informações de Troubleshooting ===${RESET}"
+echo -e "${AMARELO}Se o Mautic não iniciar corretamente, verifique os logs:${RESET}"
+echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic${RESET}"
+echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic-worker${RESET}"
+echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic-cron${RESET}"
+
+echo -e "\n${VERDE}Para executar os comandos de cron manualmente:${RESET}"
+echo -e "  ${BEGE}docker exec -it \$(docker ps -q --filter name=${MAUTIC_STACK_NAME}_mautic) php /var/www/html/bin/console mautic:segments:update${RESET}"
+echo -e "  ${BEGE}docker exec -it \$(docker ps -q --filter name=${MAUTIC_STACK_NAME}_mautic) php /var/www/html/bin/console mautic:campaigns:trigger${RESET}"
+
+echo -e "\n${VERDE}Após a instalação, verifique em Configurações > Sistema se o Queue Processing está habilitado e configurado para usar RabbitMQ.${RESET}"${VERDE} feito com sucesso!${RESET}"
+            return 0
+        else
+            echo -e "${VERMELHO}Erro, resposta inesperada do servidor ao tentar efetuar deploy da stack ${BEGE}${stack_name}${RESET}.${RESET}"
+            echo "Resposta do servidor: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        fi
+    else
+        echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
+        echo "Mensagem de erro: $(cat "$erro_output")"
+        echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        
+        # Tentar método alternativo se falhar
+        echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
+        # Tenta com outro endpoint do Portainer (método 2)
+        http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+          -H "Authorization: Bearer ${JWT_TOKEN}" \
+          -H "Content-Type: multipart/form-data" \
+          -F "Name=${stack_name}" \
+          -F "file=@$(pwd)/${yaml_file}" \
+          -F "SwarmID=${SWARM_ID}" \
+          -F "endpointId=${ENDPOINT_ID}" \
+          "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
+        
+        response_body=$(cat "$response_output")
+        
+        if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}
