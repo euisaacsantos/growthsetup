@@ -12,7 +12,7 @@ fi
 
 # Capturar parâmetros da linha de comando
 PORTAINER_URL="https://$1"           # URL do Portainer
-REDIS_DOMAIN="$2"                    # Domínio para o Redis Insight (opcional)
+REDIS_DOMAIN="$2"                    # Domínio para o Redis Commander (opcional)
 PORTAINER_PASSWORD="$3"              # Senha do Portainer
 REDIS_ADMIN_EMAIL="$4"               # Email do administrador (para registro)
 
@@ -37,7 +37,7 @@ done
 # Configurações adicionais
 PORTAINER_USER="admin"                 # Usuário do Portainer
 REDIS_STACK_NAME="redis${SUFFIX}"      # Nome da stack Redis
-REDIS_INSIGHT_STACK_NAME="redis_insight${SUFFIX}"  # Nome da stack Redis Insight (interface de gerenciamento)
+REDIS_COMMANDER_STACK_NAME="redis_commander${SUFFIX}"  # Nome da stack Redis Commander (interface web)
 
 # Cores para formatação
 AMARELO="\e[33m"
@@ -67,7 +67,6 @@ error_exit() {
 # Criar volumes Docker necessários
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
 docker volume create redis_data${SUFFIX} 2>/dev/null || echo "Volume redis_data${SUFFIX} já existe."
-docker volume create redis_insight_data${SUFFIX} 2>/dev/null || echo "Volume redis_insight_data${SUFFIX} já existe."
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 docker network inspect GrowthNet >/dev/null 2>&1 || {
@@ -112,6 +111,8 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "6379:6379"
     environment:
       - TZ=America/Sao_Paulo
     volumes:
@@ -148,17 +149,20 @@ networks:
     name: GrowthNet
 EOL
 
-# Criar arquivo docker-compose para a stack Redis Insight (interface de gerenciamento)
-echo -e "${VERDE}Criando arquivo docker-compose para a stack Redis Insight...${RESET}"
-cat > "${REDIS_INSIGHT_STACK_NAME}.yaml" <<EOL
+# Criar arquivo docker-compose para a stack Redis Commander (interface web)
+echo -e "${VERDE}Criando arquivo docker-compose para a stack Redis Commander...${RESET}"
+cat > "${REDIS_COMMANDER_STACK_NAME}.yaml" <<EOL
 version: '3.7'
 services:
-  redis-insight:
-    image: redislabs/redisinsight:latest
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    ports:
+      - "8081:8081"
     environment:
       - TZ=America/Sao_Paulo
-    volumes:
-      - redis_insight_data${SUFFIX}:/db
+      - REDIS_HOSTS=redis-server:${REDIS_STACK_NAME}_redis:6379:0:${REDIS_PASSWORD}
+      - HTTP_USER=admin
+      - HTTP_PASSWORD=${REDIS_PASSWORD}
     networks:
       - GrowthNet
     deploy:
@@ -178,18 +182,14 @@ services:
       labels:
         - traefik.enable=true
         - traefik.docker.network=GrowthNet
-        - "traefik.http.routers.redis-insight${SUFFIX}.rule=Host(\`${REDIS_DOMAIN}\`)"
-        - traefik.http.routers.redis-insight${SUFFIX}.entrypoints=websecure
-        - traefik.http.routers.redis-insight${SUFFIX}.tls=true
-        - traefik.http.routers.redis-insight${SUFFIX}.tls.certresolver=letsencryptresolver
-        - traefik.http.routers.redis-insight${SUFFIX}.priority=1
-        - traefik.http.routers.redis-insight${SUFFIX}.service=redis-insight${SUFFIX}
-        - traefik.http.services.redis-insight${SUFFIX}.loadbalancer.server.port=8001
-        - traefik.http.services.redis-insight${SUFFIX}.loadbalancer.passHostHeader=1
-
-volumes:
-  redis_insight_data${SUFFIX}:
-    external: true
+        - "traefik.http.routers.redis-commander${SUFFIX}.rule=Host(\`${REDIS_DOMAIN}\`)"
+        - traefik.http.routers.redis-commander${SUFFIX}.entrypoints=websecure
+        - traefik.http.routers.redis-commander${SUFFIX}.tls=true
+        - traefik.http.routers.redis-commander${SUFFIX}.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.redis-commander${SUFFIX}.priority=1
+        - traefik.http.routers.redis-commander${SUFFIX}.service=redis-commander${SUFFIX}
+        - traefik.http.services.redis-commander${SUFFIX}.loadbalancer.server.port=8081
+        - traefik.http.services.redis-commander${SUFFIX}.loadbalancer.passHostHeader=1
 
 networks:
   GrowthNet:
@@ -352,22 +352,14 @@ process_stack() {
     cat "${yaml_file}"
     echo
 
-    # Método direto via Docker Swarm primeiro
-    echo -e "${VERDE}Tentando deploy direto via Docker Swarm...${RESET}"
-    if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
-        echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
-        echo -e "${AMARELO}Note: A stack pode não aparecer como editável no Portainer${RESET}"
-        return 0
-    fi
-    
-    echo -e "${AMARELO}Deploy via Docker Swarm falhou, tentando via API Portainer...${RESET}"
-
     # Criar arquivo temporário para capturar a saída de erro e a resposta
     erro_output=$(mktemp)
     response_output=$(mktemp)
 
+    # PRIMEIRO: Tentar via API do Portainer para manter a stack editável
+    echo -e "${VERDE}Tentando deploy via API Portainer...${RESET}"
+    
     # Enviar a stack usando o endpoint multipart do Portainer
-    echo -e "${VERDE}Enviando a stack ${stack_name} para o Portainer...${RESET}"
     http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
       -H "Authorization: Bearer ${JWT_TOKEN}" \
       -F "Name=${stack_name}" \
@@ -384,16 +376,11 @@ process_stack() {
             echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso!${RESET}"
             return 0
         else
-            echo -e "${VERMELHO}Erro, resposta inesperada do servidor ao tentar efetuar deploy da stack ${BEGE}${stack_name}${RESET}.${RESET}"
-            echo "Resposta do servidor: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+            echo -e "${AMARELO}Resposta inesperada do servidor, tentando método alternativo...${RESET}"
         fi
     else
-        echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
-        echo "Mensagem de erro: $(cat "$erro_output")"
-        echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        echo -e "${AMARELO}Erro ao efetuar deploy inicial. Tentando método alternativo...${RESET}"
         
-        # Tentar método alternativo se falhar
-        echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
         # Tenta com outro endpoint do Portainer (método 2)
         http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
           -H "Authorization: Bearer ${JWT_TOKEN}" \
@@ -410,8 +397,17 @@ process_stack() {
             echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
             return 0
         else
-            echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
-            return 1
+            echo -e "${AMARELO}Método alternativo via API falhou. Tentando via Docker Swarm direto...${RESET}"
+            
+            # Último recurso - usar o Docker diretamente
+            if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
+                echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+                echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
+                return 0
+            else
+                echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
+                return 1
+            fi
         fi
     fi
 
@@ -429,15 +425,15 @@ if [ $? -ne 0 ]; then
     error_exit "Falha ao implementar a stack Redis."
 fi
 
-# Processar Redis Insight (se o domínio foi fornecido)
+# Processar Redis Commander (se o domínio foi fornecido)
 if [ -n "$REDIS_DOMAIN" ]; then
-    echo -e "${VERDE}Deployando Redis Insight (interface web)...${RESET}"
-    process_stack "$REDIS_INSIGHT_STACK_NAME"
+    echo -e "${VERDE}Deployando Redis Commander (interface web)...${RESET}"
+    process_stack "$REDIS_COMMANDER_STACK_NAME"
     if [ $? -ne 0 ]; then
-        echo -e "${AMARELO}Aviso: Falha ao implementar a stack Redis Insight, mas o Redis já está disponível.${RESET}"
+        echo -e "${AMARELO}Aviso: Falha ao implementar a stack Redis Commander, mas o Redis já está disponível.${RESET}"
     fi
 else
-    echo -e "${AMARELO}Domínio para Redis Insight não fornecido. Pulando a instalação da interface web.${RESET}"
+    echo -e "${AMARELO}Domínio para Redis Commander não fornecido. Pulando a instalação da interface web.${RESET}"
 fi
 
 # Preparar os dados para o webhook
@@ -462,7 +458,7 @@ WEBHOOK_DATA=$(cat << EOF
   },
   "stacks": {
     "redis": "${REDIS_STACK_NAME}",
-    "redis_insight": "${REDIS_INSIGHT_STACK_NAME}"
+    "redis_commander": "${REDIS_COMMANDER_STACK_NAME}"
   },
   "suffix": "${SUFFIX}"
 }
@@ -481,11 +477,14 @@ Redis Host: ${REDIS_STACK_NAME}_redis
 Redis Port: 6379
 Redis Password: ${REDIS_PASSWORD}
 Redis URI: redis://:${REDIS_PASSWORD}@${REDIS_STACK_NAME}_redis:6379/0
+Direct Connection: redis://:${REDIS_PASSWORD}@${server_ip}:6379/0
 EOF
 
     if [ -n "$REDIS_DOMAIN" ]; then
-        echo "Redis Insight URL: https://${REDIS_DOMAIN}" >> "${CREDENTIALS_DIR}/redis${SUFFIX}.txt"
-        echo "Nota: Ao configurar o Redis Insight, use o host ${REDIS_STACK_NAME}_redis" >> "${CREDENTIALS_DIR}/redis${SUFFIX}.txt"
+        echo "Redis Commander URL: https://${REDIS_DOMAIN}" >> "${CREDENTIALS_DIR}/redis${SUFFIX}.txt"
+        echo "Redis Commander Direct URL: http://${server_ip}:8081" >> "${CREDENTIALS_DIR}/redis${SUFFIX}.txt"
+        echo "Redis Commander Login: admin" >> "${CREDENTIALS_DIR}/redis${SUFFIX}.txt"
+        echo "Redis Commander Password: ${REDIS_PASSWORD}" >> "${CREDENTIALS_DIR}/redis${SUFFIX}.txt"
     fi
     
     chmod 600 "${CREDENTIALS_DIR}/redis${SUFFIX}.txt"
@@ -501,8 +500,12 @@ cat << EOF > /tmp/redis${SUFFIX}_output.json
   "redisPort": "6379",
   "redisPassword": "${REDIS_PASSWORD}",
   "redisUri": "redis://:${REDIS_PASSWORD}@${REDIS_STACK_NAME}_redis:6379/0",
+  "redisDirectUri": "redis://:${REDIS_PASSWORD}@${server_ip}:6379/0",
   "redisStackName": "${REDIS_STACK_NAME}",
-  "redisInsightUrl": "https://${REDIS_DOMAIN}"
+  "redisCommanderUrl": "https://${REDIS_DOMAIN}",
+  "redisCommanderDirectUrl": "http://${server_ip}:8081",
+  "redisCommanderUser": "admin",
+  "redisCommanderPassword": "${REDIS_PASSWORD}"
 }
 EOF
 
@@ -525,38 +528,47 @@ else
     echo "Resposta: ${WEBHOOK_BODY}"
 fi
 
-# Verificar status do serviço Redis
+# Verificar status das services
 echo -e "${VERDE}Verificando status do Redis...${RESET}"
 docker service ps ${REDIS_STACK_NAME}_redis --no-trunc
+
+if [ -n "$REDIS_DOMAIN" ]; then
+    echo -e "${VERDE}Verificando status do Redis Commander...${RESET}"
+    docker service ps ${REDIS_COMMANDER_STACK_NAME}_redis-commander --no-trunc
+    
+    # Verificar logs do Redis Commander
+    echo -e "${VERDE}Logs recentes do Redis Commander:${RESET}"
+    docker service logs ${REDIS_COMMANDER_STACK_NAME}_redis-commander --tail 20
+fi
 
 echo "---------------------------------------------"
 echo -e "${VERDE}[ Redis - INSTALAÇÃO COMPLETA ]${RESET}"
 echo -e "${VERDE}Redis Server:${RESET}"
-echo -e "  ${VERDE}Host:${RESET} ${REDIS_STACK_NAME}_redis"
+echo -e "  ${VERDE}Host Interno:${RESET} ${REDIS_STACK_NAME}_redis"
+echo -e "  ${VERDE}Host Externo:${RESET} ${server_ip}"
 echo -e "  ${VERDE}Porta:${RESET} 6379"
 echo -e "  ${VERDE}Senha:${RESET} ${REDIS_PASSWORD}"
-echo -e "  ${VERDE}URI:${RESET} redis://:${REDIS_PASSWORD}@${REDIS_STACK_NAME}_redis:6379/0"
+echo -e "  ${VERDE}URI Interna:${RESET} redis://:${REDIS_PASSWORD}@${REDIS_STACK_NAME}_redis:6379/0"
+echo -e "  ${VERDE}URI Externa:${RESET} redis://:${REDIS_PASSWORD}@${server_ip}:6379/0"
 
 if [ -n "$REDIS_DOMAIN" ]; then
-    echo -e "${VERDE}Redis Insight (Interface Web):${RESET}"
-    echo -e "  ${VERDE}URL:${RESET} https://${REDIS_DOMAIN}"
-    echo -e "  ${VERDE}Configuração:${RESET} Ao adicionar o Redis no interface, use:"
-    echo -e "    ${BEGE}Host:${RESET} ${REDIS_STACK_NAME}_redis"
-    echo -e "    ${BEGE}Porta:${RESET} 6379"
-    echo -e "    ${BEGE}Nome:${RESET} Redis ${SUFFIX}"
-    echo -e "    ${BEGE}Senha:${RESET} ${REDIS_PASSWORD}"
+    echo -e "${VERDE}Redis Commander (Interface Web):${RESET}"
+    echo -e "  ${VERDE}URL via Traefik:${RESET} https://${REDIS_DOMAIN}"
+    echo -e "  ${VERDE}URL Direta:${RESET} http://${server_ip}:8081"
+    echo -e "  ${VERDE}Login:${RESET} admin"
+    echo -e "  ${VERDE}Senha:${RESET} ${REDIS_PASSWORD}"
 fi
 
 echo -e "${VERDE}Stacks criadas com sucesso:${RESET}"
 echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 if [ -n "$REDIS_DOMAIN" ]; then
-    echo -e "  - ${BEGE}${REDIS_INSIGHT_STACK_NAME}${RESET}"
+    echo -e "  - ${BEGE}${REDIS_COMMANDER_STACK_NAME}${RESET}"
 fi
 
 echo -e "${VERDE}Arquivo de configuração Redis:${RESET} ${REDIS_CONF_DIR}/redis.conf"
 echo -e "${VERDE}Tamanho máximo de memória:${RESET} 256MB (configurável no redis.conf)"
 
 echo -e "${AMARELO}Dicas para conectar aplicações:${RESET}"
-echo -e "  - ${BEGE}Node.js:${RESET} const client = redis.createClient({url: 'redis://:${REDIS_PASSWORD}@${REDIS_STACK_NAME}_redis:6379/0'})"
-echo -e "  - ${BEGE}Python:${RESET} r = redis.Redis(host='${REDIS_STACK_NAME}_redis', port=6379, password='${REDIS_PASSWORD}')"
-echo -e "  - ${BEGE}PHP:${RESET} \$redis = new Redis(); \$redis->connect('${REDIS_STACK_NAME}_redis', 6379); \$redis->auth('${REDIS_PASSWORD}');"
+echo -e "  - ${BEGE}Node.js:${RESET} const client = redis.createClient({url: 'redis://:${REDIS_PASSWORD}@${server_ip}:6379/0'})"
+echo -e "  - ${BEGE}Python:${RESET} r = redis.Redis(host='${server_ip}', port=6379, password='${REDIS_PASSWORD}')"
+echo -e "  - ${BEGE}PHP:${RESET} \$redis = new Redis(); \$redis->connect('${server_ip}', 6379); \$redis->auth('${REDIS_PASSWORD}');"
