@@ -97,27 +97,43 @@ cat > "mautic_scripts${SUFFIX}/run_mautic_crons.sh" <<EOL
 #!/bin/bash
 # Script para executar os comandos cron do Mautic
 
+cat > "mautic_scripts${SUFFIX}/run_mautic_crons.sh" <<EOL
+#!/bin/bash
+# Script para executar os comandos cron do Mautic
+
+# Determinar o caminho do PHP
+PHP_PATH=\$(which php)
+if [ -z "\$PHP_PATH" ]; then
+    echo "ERRO: PHP não encontrado no sistema. Instalando..."
+    apt-get update && apt-get install -y php-cli
+    PHP_PATH=\$(which php)
+    if [ -z "\$PHP_PATH" ]; then
+        echo "ERRO: Falha ao instalar PHP. Abortando."
+        exit 1
+    fi
+fi
+
 echo "Executando: mautic:segments:update"
-php /var/www/html/bin/console mautic:segments:update --env=prod
+\$PHP_PATH /var/www/html/bin/console mautic:segments:update --env=prod
 
 echo "Executando: mautic:campaigns:update"
-php /var/www/html/bin/console mautic:campaigns:update --env=prod
+\$PHP_PATH /var/www/html/bin/console mautic:campaigns:update --env=prod
 
 echo "Executando: mautic:campaigns:trigger"
-php /var/www/html/bin/console mautic:campaigns:trigger --env=prod
+\$PHP_PATH /var/www/html/bin/console mautic:campaigns:trigger --env=prod
 
 echo "Executando: mautic:emails:send"
-php /var/www/html/bin/console mautic:emails:send --env=prod
+\$PHP_PATH /var/www/html/bin/console mautic:emails:send --env=prod
 
 echo "Executando: mautic:webhooks:process"
-php /var/www/html/bin/console mautic:webhooks:process --env=prod
+\$PHP_PATH /var/www/html/bin/console mautic:webhooks:process --env=prod
 
 HOUR=\$(date +%H)
 if [ "\$HOUR" = "00" ]; then
     echo "Executando tarefas diárias..."
-    php /var/www/html/bin/console mautic:segments:rebuild --env=prod
-    php /var/www/html/bin/console mautic:campaigns:rebuild --env=prod
-    php /var/www/html/bin/console mautic:maintenance:cleanup --days-old=365 --env=prod
+    \$PHP_PATH /var/www/html/bin/console mautic:segments:rebuild --env=prod
+    \$PHP_PATH /var/www/html/bin/console mautic:campaigns:rebuild --env=prod
+    \$PHP_PATH /var/www/html/bin/console mautic:maintenance:cleanup --days-old=365 --env=prod
 fi
 
 echo "Cron jobs do Mautic executados com sucesso em \$(date)"
