@@ -1,4 +1,190 @@
-#!/bin/bash
+# Implementar stacks na ordem correta: MySQL, RabbitMQ, depois Mautic
+echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
+
+# Processar MySQL primeiro
+process_stack "$MYSQL_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar MySQL, mas continuando...${RESET}"
+fi
+
+# Processar RabbitMQ segundo
+process_stack "$RABBITMQ_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar RabbitMQ, mas continuando...${RESET}"
+fi
+
+# Adicionar uma pausa para garantir que o MySQL e RabbitMQ sejam inicializados
+echo -e "${VERDE}Aguardando 15 segundos para inicialização do MySQL e RabbitMQ...${RESET}"
+sleep 15
+
+# Processar Mautic terceiro (depende do MySQL e RabbitMQ)
+process_stack "$MAUTIC_STACK_NAME"
+if [ $? -ne 0 ]; then
+    error_exit "Falha ao implementar a stack Mautic."
+fi
+
+# Preparar os dados para o webhook
+timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+hostname=$(hostname)
+server_ip=$(hostname -I | awk '{print $1}')
+
+# Criar objeto JSON para o webhook
+WEBHOOK_DATA=$(cat << EOF
+{
+  "installation_id": "${INSTALLATION_ID}",
+  "timestamp": "${timestamp}",
+  "hostname": "${hostname}",
+  "server_ip": "${server_ip}",
+  "link": "https://${MAUTIC_DOMAIN}",
+  "mautic": {
+    "domain": "${MAUTIC_DOMAIN}",
+    "admin_email": "${MAUTIC_ADMIN_EMAIL}",
+    "admin_password": "${MAUTIC_ADMIN_PASSWORD}",
+    "database_uri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
+    "rabbitmq_uri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
+  },
+  "stacks": {
+    "mysql": "${MYSQL_STACK_NAME}",
+    "rabbitmq": "${RABBITMQ_STACK_NAME}",
+    "mautic": "${MAUTIC_STACK_NAME}"
+  },
+  "suffix": "${SUFFIX}"
+}
+EOF
+)
+
+# Salvar credenciais
+CREDENTIALS_DIR="/root/.credentials"
+if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
+    chmod 700 "$CREDENTIALS_DIR"
+    
+    # Cria o arquivo de credenciais separadamente para evitar problemas com a saída
+    cat > "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt" << EOF
+Mautic Information
+URL: https://${MAUTIC_DOMAIN}
+Email do Admin: ${MAUTIC_ADMIN_EMAIL}
+Senha do Admin: ${MAUTIC_ADMIN_PASSWORD}
+MySQL Root Password: ${MYSQL_ROOT_PASSWORD}
+MySQL Mautic Password: ${MYSQL_PASSWORD}
+RabbitMQ Password: ${RABBITMQ_PASSWORD}
+RabbitMQ Admin URL: https://rabbitmq.${MAUTIC_DOMAIN}
+RabbitMQ Username: mautic
+Database: mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic
+RabbitMQ: amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F
+EOF
+    chmod 600 "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt"
+    echo -e "${VERDE}Credenciais do Mautic salvas em ${CREDENTIALS_DIR}/mautic${SUFFIX}.txt${RESET}"
+else
+    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
+fi
+
+# Criar um objeto JSON de saída para integração com outros sistemas
+cat << EOF > /tmp/mautic${SUFFIX}_output.json
+{
+  "url": "https://${MAUTIC_DOMAIN}",
+  "adminEmail": "${MAUTIC_ADMIN_EMAIL}",
+  "adminPassword": "${MAUTIC_ADMIN_PASSWORD}",
+  "mysqlRootPassword": "${MYSQL_ROOT_PASSWORD}",
+  "mysqlMauticPassword": "${MYSQL_PASSWORD}",
+  "rabbitmqPassword": "${RABBITMQ_PASSWORD}",
+  "rabbitmqUrl": "https://rabbitmq.${MAUTIC_DOMAIN}",
+  "rabbitmqDirectUrl": "http://${server_ip}:15672",
+  "mauticStackName": "${MAUTIC_STACK_NAME}",
+  "mysqlStackName": "${MYSQL_STACK_NAME}",
+  "rabbitmqStackName": "${RABBITMQ_STACK_NAME}",
+  "databaseUri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
+  "databaseDirectUri": "mysql://mautic:${MYSQL_PASSWORD}@${server_ip}:3306/mautic",
+  "rabbitmqUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F",
+  "rabbitmqDirectUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${server_ip}:5672/%2F"
+}
+EOF
+
+echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/mautic${SUFFIX}_output.json${RESET}"
+
+# Enviar dados para o webhook
+echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
+WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
+  -H "Content-Type: application/json" \
+  -d "${WEBHOOK_DATA}" \
+  -w "\n%{http_code}")
+
+HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
+WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
+    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
+else
+    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
+    echo "Resposta: ${WEBHOOK_BODY}"
+fi
+
+# Detectar container real do Mautic
+CONTAINER_ID=$(docker ps --filter "name=${MAUTIC_STACK_NAME}_mautic" --format "{{.ID}}")
+
+if [ -z "$CONTAINER_ID" ]; then
+    echo -e "${AMARELO}Não foi possível detectar o container do Mautic para gerar crons.${RESET}"
+else
+    echo -e "${VERDE}Container do Mautic detectado: ${CONTAINER_ID}${RESET}"
+
+    CRON_SEGMENTS_UPDATE="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:segments:update >> /var/log/mautic_segments.log 2>&1"
+    CRON_CAMPAIGNS_UPDATE="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:campaigns:update >> /var/log/mautic_campaigns_update.log 2>&1"
+    CRON_CAMPAIGNS_TRIGGER="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:campaigns:trigger >> /var/log/mautic_campaigns_trigger.log 2>&1"
+
+    # Salvar crons no .txt de credenciais
+    {
+        echo ""
+        echo "Mautic Crons para adicionar no crontab:"
+        echo "${CRON_SEGMENTS_UPDATE}"
+        echo "${CRON_CAMPAIGNS_UPDATE}"
+        echo "${CRON_CAMPAIGNS_TRIGGER}"
+    } >> "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt"
+
+    # Atualizar o JSON de saída
+    jq ". + {
+      crons: {
+        segments_update: \"${CRON_SEGMENTS_UPDATE}\",
+        campaigns_update: \"${CRON_CAMPAIGNS_UPDATE}\",
+        campaigns_trigger: \"${CRON_CAMPAIGNS_TRIGGER}\"
+      }
+    }" /tmp/mautic${SUFFIX}_output.json > /tmp/mautic${SUFFIX}_output_tmp.json && mv /tmp/mautic${SUFFIX}_output_tmp.json /tmp/mautic${SUFFIX}_output.json
+fi
+
+# Verificar status dos serviços
+echo -e "${VERDE}Verificando status do Mautic...${RESET}"
+docker service ps ${MAUTIC_STACK_NAME}_mautic --no-trunc
+docker service ps ${MAUTIC_STACK_NAME}_mautic-worker --no-trunc || echo "Serviço mautic-worker ainda não disponível"
+docker service ps ${MAUTIC_STACK_NAME}_mautic-cron --no-trunc || echo "Serviço mautic-cron ainda não disponível"
+
+echo "---------------------------------------------"
+echo -e "${VERDE}[ Mautic - INSTALAÇÃO COMPLETA ]${RESET}"
+echo -e "${VERDE}URL:${RESET} https://${MAUTIC_DOMAIN}"
+echo -e "${VERDE}Email do Admin:${RESET} ${MAUTIC_ADMIN_EMAIL}"
+echo -e "${VERDE}Senha do Admin:${RESET} ${MAUTIC_ADMIN_PASSWORD}"
+echo -e "${VERDE}MySQL Root Password:${RESET} ${MYSQL_ROOT_PASSWORD}"
+echo -e "${VERDE}MySQL Mautic Password:${RESET} ${MYSQL_PASSWORD}"
+echo -e "${VERDE}RabbitMQ Password:${RESET} ${RABBITMQ_PASSWORD}"
+echo -e "${VERDE}RabbitMQ Admin URL:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
+echo -e "${VERDE}RabbitMQ Direct URL:${RESET} http://${server_ip}:15672"
+echo -e "${VERDE}RabbitMQ Username:${RESET} mautic"
+echo -e "${VERDE}Stacks criadas com sucesso:${RESET}"
+echo -e "  - ${BEGE}${MYSQL_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${RABBITMQ_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${MAUTIC_STACK_NAME}${RESET}"
+echo -e "${VERDE}Acesse seu Mautic através do endereço:${RESET} https://${MAUTIC_DOMAIN}"
+echo -e "${VERDE}Acesse o painel do RabbitMQ em:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
+echo -e "${VERDE}Ou diretamente via:${RESET} http://${server_ip}:15672"
+
+echo -e "\n${VERDE}=== Informações de Troubleshooting ===${RESET}"
+echo -e "${AMARELO}Se o Mautic não iniciar corretamente, verifique os logs:${RESET}"
+echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic${RESET}"
+echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic-worker${RESET}"
+echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic-cron${RESET}"
+
+echo -e "\n${VERDE}Para executar os comandos de cron manualmente:${RESET}"
+echo -e "  ${BEGE}docker exec -it \$(docker ps -q --filter name=${MAUTIC_STACK_NAME}_mautic) php /var/www/html/bin/console mautic:segments:update${RESET}"
+echo -e "  ${BEGE}docker exec -it \$(docker ps -q --filter name=${MAUTIC_STACK_NAME}_mautic) php /var/www/html/bin/console mautic:campaigns:trigger${RESET}"
+
+echo -e "\n${VERDE}Após a instalação, verifique em Configurações > Sistema se o Queue Processing está habilitado e configurado para usar RabbitMQ.${RESET}"#!/bin/bash
 # Script para criar stacks para Mautic no Portainer (Mautic, MySQL e RabbitMQ)
 # Uso: curl -s -k https://raw.githubusercontent.com/euisaacsantos/growthsetup/refs/heads/main/instalador_mautic.sh | bash -s <portainer_url> <mautic_domain> <portainer_password> <mautic_admin_email> [sufixo] [id-xxxx]
 # Exemplo: curl -s -k https://raw.githubusercontent.com/euisaacsantos/growthsetup/refs/heads/main/instalador_mautic.sh | bash -s painel.trafegocomia.com mautic.growthtap.com.br senha123 admin@exemplo.com cliente1 id-12341221125
@@ -393,86 +579,6 @@ echo -e "URL do Portainer: ${BEGE}${PORTAINER_URL}${RESET}"
 # Usar curl com a opção -k para ignorar verificação de certificado
 AUTH_RESPONSE=$(curl -k -s -X POST "${PORTAINER_URL}/api/auth" \
     -H "Content-Type: application/json" \
-  -d "${WEBHOOK_DATA}" \
-  -w "\n%{http_code}")
-
-HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
-WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
-
-if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
-    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
-else
-    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
-    echo "Resposta: ${WEBHOOK_BODY}"
-fi
-
-# Detectar container real do Mautic
-CONTAINER_ID=$(docker ps --filter "name=${MAUTIC_STACK_NAME}_mautic" --format "{{.ID}}")
-
-if [ -z "$CONTAINER_ID" ]; then
-    echo -e "${AMARELO}Não foi possível detectar o container do Mautic para gerar crons.${RESET}"
-else
-    echo -e "${VERDE}Container do Mautic detectado: ${CONTAINER_ID}${RESET}"
-
-    CRON_SEGMENTS_UPDATE="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:segments:update >> /var/log/mautic_segments.log 2>&1"
-    CRON_CAMPAIGNS_UPDATE="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:campaigns:update >> /var/log/mautic_campaigns_update.log 2>&1"
-    CRON_CAMPAIGNS_TRIGGER="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:campaigns:trigger >> /var/log/mautic_campaigns_trigger.log 2>&1"
-
-    # Salvar crons no .txt de credenciais
-    {
-        echo ""
-        echo "Mautic Crons para adicionar no crontab:"
-        echo "${CRON_SEGMENTS_UPDATE}"
-        echo "${CRON_CAMPAIGNS_UPDATE}"
-        echo "${CRON_CAMPAIGNS_TRIGGER}"
-    } >> "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt"
-
-    # Atualizar o JSON de saída
-    jq ". + {
-      crons: {
-        segments_update: \"${CRON_SEGMENTS_UPDATE}\",
-        campaigns_update: \"${CRON_CAMPAIGNS_UPDATE}\",
-        campaigns_trigger: \"${CRON_CAMPAIGNS_TRIGGER}\"
-      }
-    }" /tmp/mautic${SUFFIX}_output.json > /tmp/mautic${SUFFIX}_output_tmp.json && mv /tmp/mautic${SUFFIX}_output_tmp.json /tmp/mautic${SUFFIX}_output.json
-fi
-
-# Verificar status dos serviços
-echo -e "${VERDE}Verificando status do Mautic...${RESET}"
-docker service ps ${MAUTIC_STACK_NAME}_mautic --no-trunc
-docker service ps ${MAUTIC_STACK_NAME}_mautic-worker --no-trunc || echo "Serviço mautic-worker ainda não disponível"
-docker service ps ${MAUTIC_STACK_NAME}_mautic-cron --no-trunc || echo "Serviço mautic-cron ainda não disponível"
-
-echo "---------------------------------------------"
-echo -e "${VERDE}[ Mautic - INSTALAÇÃO COMPLETA ]${RESET}"
-echo -e "${VERDE}URL:${RESET} https://${MAUTIC_DOMAIN}"
-echo -e "${VERDE}Email do Admin:${RESET} ${MAUTIC_ADMIN_EMAIL}"
-echo -e "${VERDE}Senha do Admin:${RESET} ${MAUTIC_ADMIN_PASSWORD}"
-echo -e "${VERDE}MySQL Root Password:${RESET} ${MYSQL_ROOT_PASSWORD}"
-echo -e "${VERDE}MySQL Mautic Password:${RESET} ${MYSQL_PASSWORD}"
-echo -e "${VERDE}RabbitMQ Password:${RESET} ${RABBITMQ_PASSWORD}"
-echo -e "${VERDE}RabbitMQ Admin URL:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
-echo -e "${VERDE}RabbitMQ Direct URL:${RESET} http://${server_ip}:15672"
-echo -e "${VERDE}RabbitMQ Username:${RESET} mautic"
-echo -e "${VERDE}Stacks criadas com sucesso:${RESET}"
-echo -e "  - ${BEGE}${MYSQL_STACK_NAME}${RESET}"
-echo -e "  - ${BEGE}${RABBITMQ_STACK_NAME}${RESET}"
-echo -e "  - ${BEGE}${MAUTIC_STACK_NAME}${RESET}"
-echo -e "${VERDE}Acesse seu Mautic através do endereço:${RESET} https://${MAUTIC_DOMAIN}"
-echo -e "${VERDE}Acesse o painel do RabbitMQ em:${RESET} https://rabbitmq.${MAUTIC_DOMAIN}"
-echo -e "${VERDE}Ou diretamente via:${RESET} http://${server_ip}:15672"
-
-echo -e "\n${VERDE}=== Informações de Troubleshooting ===${RESET}"
-echo -e "${AMARELO}Se o Mautic não iniciar corretamente, verifique os logs:${RESET}"
-echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic${RESET}"
-echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic-worker${RESET}"
-echo -e "  ${BEGE}docker service logs ${MAUTIC_STACK_NAME}_mautic-cron${RESET}"
-
-echo -e "\n${VERDE}Para executar os comandos de cron manualmente:${RESET}"
-echo -e "  ${BEGE}docker exec -it \$(docker ps -q --filter name=${MAUTIC_STACK_NAME}_mautic) php /var/www/html/bin/console mautic:segments:update${RESET}"
-echo -e "  ${BEGE}docker exec -it \$(docker ps -q --filter name=${MAUTIC_STACK_NAME}_mautic) php /var/www/html/bin/console mautic:campaigns:trigger${RESET}"
-
-echo -e "\n${VERDE}Após a instalação, verifique em Configurações > Sistema se o Queue Processing está habilitado e configurado para usar RabbitMQ.${RESET}"
     -d "{\"username\":\"${PORTAINER_USER}\",\"password\":\"${PORTAINER_PASSWORD}\"}" \
     -w "\n%{http_code}")
 
@@ -652,116 +758,45 @@ process_stack() {
                 return 1
             fi
         fi
+    else
+        echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
+        echo "Mensagem de erro: $(cat "$erro_output")"
+        echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        
+        # Tentar método alternativo se falhar
+        echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
+        # Tenta com outro endpoint do Portainer (método 2)
+        http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+          -H "Authorization: Bearer ${JWT_TOKEN}" \
+          -H "Content-Type: multipart/form-data" \
+          -F "Name=${stack_name}" \
+          -F "file=@$(pwd)/${yaml_file}" \
+          -F "SwarmID=${SWARM_ID}" \
+          -F "endpointId=${ENDPOINT_ID}" \
+          "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
+        
+        response_body=$(cat "$response_output")
+        
+        if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
+            return 0
+        else
+            echo -e "${VERMELHO}Erro ao efetuar deploy pelo método alternativo. Resposta HTTP: ${http_code}${RESET}"
+            echo "Mensagem de erro: $(cat "$erro_output")"
+            
+            # Último recurso - usar o Docker diretamente
+            echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
+            if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
+                echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+                echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
+                return 0
+            else
+                echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
+                return 1
+            fi
+        fi
     fi
 
     # Remove os arquivos temporários
     rm -f "$erro_output" "$response_output"
 }
-
-# Implementar stacks na ordem correta: MySQL, RabbitMQ, depois Mautic
-echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
-
-# Processar MySQL primeiro
-process_stack "$MYSQL_STACK_NAME"
-if [ $? -ne 0 ]; then
-    echo -e "${AMARELO}Aviso: Problemas ao implementar MySQL, mas continuando...${RESET}"
-fi
-
-# Processar RabbitMQ segundo
-process_stack "$RABBITMQ_STACK_NAME"
-if [ $? -ne 0 ]; then
-    echo -e "${AMARELO}Aviso: Problemas ao implementar RabbitMQ, mas continuando...${RESET}"
-fi
-
-# Adicionar uma pausa para garantir que o MySQL e RabbitMQ sejam inicializados
-echo -e "${VERDE}Aguardando 15 segundos para inicialização do MySQL e RabbitMQ...${RESET}"
-sleep 15
-
-# Processar Mautic terceiro (depende do MySQL e RabbitMQ)
-process_stack "$MAUTIC_STACK_NAME"
-if [ $? -ne 0 ]; then
-    error_exit "Falha ao implementar a stack Mautic."
-fi
-
-# Preparar os dados para o webhook
-timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-hostname=$(hostname)
-server_ip=$(hostname -I | awk '{print $1}')
-
-# Criar objeto JSON para o webhook
-WEBHOOK_DATA=$(cat << EOF
-{
-  "installation_id": "${INSTALLATION_ID}",
-  "timestamp": "${timestamp}",
-  "hostname": "${hostname}",
-  "server_ip": "${server_ip}",
-  "link": "https://${MAUTIC_DOMAIN}",
-  "mautic": {
-    "domain": "${MAUTIC_DOMAIN}",
-    "admin_email": "${MAUTIC_ADMIN_EMAIL}",
-    "admin_password": "${MAUTIC_ADMIN_PASSWORD}",
-    "database_uri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
-    "rabbitmq_uri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
-  },
-  "stacks": {
-    "mysql": "${MYSQL_STACK_NAME}",
-    "rabbitmq": "${RABBITMQ_STACK_NAME}",
-    "mautic": "${MAUTIC_STACK_NAME}"
-  },
-  "suffix": "${SUFFIX}"
-}
-EOF
-)
-
-# Salvar credenciais
-CREDENTIALS_DIR="/root/.credentials"
-if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
-    chmod 700 "$CREDENTIALS_DIR"
-    
-    # Cria o arquivo de credenciais separadamente para evitar problemas com a saída
-    cat > "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt" << EOF
-Mautic Information
-URL: https://${MAUTIC_DOMAIN}
-Email do Admin: ${MAUTIC_ADMIN_EMAIL}
-Senha do Admin: ${MAUTIC_ADMIN_PASSWORD}
-MySQL Root Password: ${MYSQL_ROOT_PASSWORD}
-MySQL Mautic Password: ${MYSQL_PASSWORD}
-RabbitMQ Password: ${RABBITMQ_PASSWORD}
-RabbitMQ Admin URL: https://rabbitmq.${MAUTIC_DOMAIN}
-RabbitMQ Username: mautic
-Database: mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic
-RabbitMQ: amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F
-EOF
-    chmod 600 "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt"
-    echo -e "${VERDE}Credenciais do Mautic salvas em ${CREDENTIALS_DIR}/mautic${SUFFIX}.txt${RESET}"
-else
-    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
-fi
-
-# Criar um objeto JSON de saída para integração com outros sistemas
-cat << EOF > /tmp/mautic${SUFFIX}_output.json
-{
-  "url": "https://${MAUTIC_DOMAIN}",
-  "adminEmail": "${MAUTIC_ADMIN_EMAIL}",
-  "adminPassword": "${MAUTIC_ADMIN_PASSWORD}",
-  "mysqlRootPassword": "${MYSQL_ROOT_PASSWORD}",
-  "mysqlMauticPassword": "${MYSQL_PASSWORD}",
-  "rabbitmqPassword": "${RABBITMQ_PASSWORD}",
-  "rabbitmqUrl": "https://rabbitmq.${MAUTIC_DOMAIN}",
-  "rabbitmqDirectUrl": "http://${server_ip}:15672",
-  "mauticStackName": "${MAUTIC_STACK_NAME}",
-  "mysqlStackName": "${MYSQL_STACK_NAME}",
-  "rabbitmqStackName": "${RABBITMQ_STACK_NAME}",
-  "databaseUri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
-  "databaseDirectUri": "mysql://mautic:${MYSQL_PASSWORD}@${server_ip}:3306/mautic",
-  "rabbitmqUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F",
-  "rabbitmqDirectUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${server_ip}:5672/%2F"
-}
-EOF
-
-echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/mautic${SUFFIX}_output.json${RESET}"
-
-# Enviar dados para o webhook
-echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
-WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
-  -H "Content-Type: application/json" \
