@@ -91,12 +91,8 @@ docker network inspect GrowthNet >/dev/null 2>&1 || {
 echo -e "${VERDE}Criando diretório para scripts auxiliares...${RESET}"
 mkdir -p mautic_scripts${SUFFIX}
 
-# CORREÇÃO 1: Atualizar script para cron jobs com o comando campaigns:update
+# CORREÇÃO 1: Script run_mautic_crons.sh com detecção dinâmica do caminho do PHP
 echo -e "${VERDE}Criando script para cron jobs...${RESET}"
-cat > "mautic_scripts${SUFFIX}/run_mautic_crons.sh" <<EOL
-#!/bin/bash
-# Script para executar os comandos cron do Mautic
-
 cat > "mautic_scripts${SUFFIX}/run_mautic_crons.sh" <<EOL
 #!/bin/bash
 # Script para executar os comandos cron do Mautic
@@ -108,10 +104,20 @@ if [ -z "\$PHP_PATH" ]; then
     apt-get update && apt-get install -y php-cli
     PHP_PATH=\$(which php)
     if [ -z "\$PHP_PATH" ]; then
-        echo "ERRO: Falha ao instalar PHP. Abortando."
-        exit 1
+        echo "ERRO: Falha ao instalar PHP. Tentando caminhos comuns..."
+        # Tentar caminhos comuns
+        if [ -f "/usr/bin/php" ]; then
+            PHP_PATH="/usr/bin/php"
+        elif [ -f "/usr/local/bin/php" ]; then
+            PHP_PATH="/usr/local/bin/php"
+        else
+            echo "ERRO: PHP não encontrado em caminhos comuns. Abortando."
+            exit 1
+        fi
     fi
 fi
+
+echo "Usando PHP em: \$PHP_PATH"
 
 echo "Executando: mautic:segments:update"
 \$PHP_PATH /var/www/html/bin/console mautic:segments:update --env=prod
@@ -298,7 +304,7 @@ services:
         - traefik.http.services.mautic${SUFFIX}.loadbalancer.server.port=80
         - traefik.http.services.mautic${SUFFIX}.loadbalancer.passHostHeader=1
 
-  # CORREÇÃO 2: Atualizar command do mautic-worker para consumir a fila "default"
+  # CORREÇÃO 2: Atualizar o command do mautic-worker para consumir a fila "default"
   mautic-worker:
     image: mautic/mautic:latest
     networks:
@@ -362,6 +368,10 @@ services:
       echo "* * * * * /usr/local/bin/run_mautic_crons.sh >> /var/log/cron.log 2>&1" > /etc/cron.d/mautic-cron
       chmod 644 /etc/cron.d/mautic-cron
       apt-get update && apt-get install -y cron php-cli
+      if [ $? -ne 0 ]; then
+        echo "Falha ao instalar php-cli, tentando alternativas..."
+        apt-get install -y php8.2-cli || apt-get install -y php8.1-cli || apt-get install -y php8.0-cli
+      fi
       crontab /etc/cron.d/mautic-cron
       touch /var/log/cron.log
       echo "Iniciando cron para Mautic..."
@@ -546,15 +556,84 @@ process_stack() {
         fi
     fi
 
-    # Tentar deploy via Docker Stack diretamente (método mais confiável)
-    echo -e "${VERDE}Tentando deploy direto via Docker Swarm...${RESET}"
-    if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
-        echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
-        return 0
+    # Criar arquivo temporário para capturar a saída de erro e a resposta
+    erro_output=$(mktemp)
+    response_output=$(mktemp)
+
+    # CORREÇÃO 4: Usar a API do Portainer para que as stacks sejam editáveis
+    echo -e "${VERDE}Tentando deploy via API Portainer...${RESET}"
+    
+    # Enviar a stack usando o endpoint multipart do Portainer
+    http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+      -H "Authorization: Bearer ${JWT_TOKEN}" \
+      -F "Name=${stack_name}" \
+      -F "file=@$(pwd)/${yaml_file}" \
+      -F "SwarmID=${SWARM_ID}" \
+      -F "endpointId=${ENDPOINT_ID}" \
+      "${PORTAINER_URL}/api/stacks/create/swarm/file" 2> "$erro_output")
+
+    response_body=$(cat "$response_output")
+
+    if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+        # Verifica o conteúdo da resposta para garantir que o deploy foi bem-sucedido
+        if echo "$response_body" | grep -q "\"Id\""; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Portainer API!${RESET}"
+            return 0
+        else
+            echo -e "${VERMELHO}Erro ao efetuar deploy pelo método API. Resposta HTTP: ${http_code}${RESET}"
+            echo "Mensagem de erro: $(cat "$erro_output")"
+            echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+            
+            # Tentar método alternativo se falhar
+            echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
+            # Tenta com outro endpoint do Portainer (método 2)
+            http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+              -H "Authorization: Bearer ${JWT_TOKEN}" \
+              -H "Content-Type: multipart/form-data" \
+              -F "Name=${stack_name}" \
+              -F "file=@$(pwd)/${yaml_file}" \
+              -F "SwarmID=${SWARM_ID}" \
+              -F "endpointId=${ENDPOINT_ID}" \
+              "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
+            
+            response_body=$(cat "$response_output")
+            
+            if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+                echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via método alternativo!${RESET}"
+                return 0
+            else
+                echo -e "${VERMELHO}Erro ao efetuar deploy pelo método alternativo. Tentando Docker Swarm direto...${RESET}"
+                # Último recurso - usar o Docker diretamente
+                echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
+                if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
+                    echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+                    echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
+                    return 0
+                else
+                    echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
+                    return 1
+                fi
+            fi
+        fi
     else
-        echo -e "${VERMELHO}Falha ao fazer deploy da stack ${stack_name}.${RESET}"
-        return 1
+        echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
+        echo "Mensagem de erro: $(cat "$erro_output")"
+        echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        
+        # Tentar método alternativo
+        echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
+        if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+            echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
+            return 0
+        else
+            echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
+            return 1
+        fi
     fi
+
+    # Remove os arquivos temporários
+    rm -f "$erro_output" "$response_output"
 }
 
 # Implementar stacks na ordem correta: MySQL, RabbitMQ, depois Mautic
@@ -587,6 +666,31 @@ timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 hostname=$(hostname)
 server_ip=$(hostname -I | awk '{print $1}')
 
+# Criar objeto JSON para o webhook
+WEBHOOK_DATA=$(cat << EOF
+{
+  "installation_id": "${INSTALLATION_ID}",
+  "timestamp": "${timestamp}",
+  "hostname": "${hostname}",
+  "server_ip": "${server_ip}",
+  "link": "https://${MAUTIC_DOMAIN}",
+  "mautic": {
+    "domain": "${MAUTIC_DOMAIN}",
+    "admin_email": "${MAUTIC_ADMIN_EMAIL}",
+    "admin_password": "${MAUTIC_ADMIN_PASSWORD}",
+    "database_uri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
+    "rabbitmq_uri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
+  },
+  "stacks": {
+    "mysql": "${MYSQL_STACK_NAME}",
+    "rabbitmq": "${RABBITMQ_STACK_NAME}",
+    "mautic": "${MAUTIC_STACK_NAME}"
+  },
+  "suffix": "${SUFFIX}"
+}
+EOF
+)
+
 # Salvar credenciais
 CREDENTIALS_DIR="/root/.credentials"
 if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
@@ -612,31 +716,8 @@ else
     echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
 fi
 
-# CORREÇÃO 4: Detectar o container do Mautic para gerar comandos cron externos
-sleep 10  # Esperar um pouco para garantir que o container foi criado
-
-CONTAINER_ID=$(docker ps --filter "name=${MAUTIC_STACK_NAME}_mautic" --format "{{.ID}}")
-
-if [ -z "$CONTAINER_ID" ]; then
-    echo -e "${AMARELO}Não foi possível detectar o container do Mautic para gerar crons.${RESET}"
-else
-    echo -e "${VERDE}Container do Mautic detectado: ${CONTAINER_ID}${RESET}"
-
-    CRON_SEGMENTS_UPDATE="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:segments:update >> /var/log/mautic_segments.log 2>&1"
-    CRON_CAMPAIGNS_UPDATE="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:campaigns:update >> /var/log/mautic_campaigns_update.log 2>&1"
-    CRON_CAMPAIGNS_TRIGGER="*/5 * * * * docker exec -i ${CONTAINER_ID} php /var/www/html/bin/console mautic:campaigns:trigger >> /var/log/mautic_campaigns_trigger.log 2>&1"
-
-    # Salvar crons no .txt de credenciais
-    {
-        echo ""
-        echo "Mautic Crons para adicionar no crontab:"
-        echo "${CRON_SEGMENTS_UPDATE}"
-        echo "${CRON_CAMPAIGNS_UPDATE}"
-        echo "${CRON_CAMPAIGNS_TRIGGER}"
-    } >> "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt"
-
-    # Criar um objeto JSON de saída para integração com outros sistemas
-    cat << EOF > /tmp/mautic${SUFFIX}_output.json
+# Criar um objeto JSON de saída para integração com outros sistemas
+cat << EOF > /tmp/mautic${SUFFIX}_output.json
 {
   "url": "https://${MAUTIC_DOMAIN}",
   "adminEmail": "${MAUTIC_ADMIN_EMAIL}",
@@ -652,15 +733,66 @@ else
   "databaseUri": "mysql://mautic:${MYSQL_PASSWORD}@${MYSQL_STACK_NAME}_mysql:3306/mautic",
   "databaseDirectUri": "mysql://mautic:${MYSQL_PASSWORD}@${server_ip}:3306/mautic",
   "rabbitmqUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F",
-  "rabbitmqDirectUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${server_ip}:5672/%2F",
-  "crons": {
-    "segments_update": "${CRON_SEGMENTS_UPDATE}",
-    "campaigns_update": "${CRON_CAMPAIGNS_UPDATE}",
-    "campaigns_trigger": "${CRON_CAMPAIGNS_TRIGGER}"
-  }
+  "rabbitmqDirectUri": "amqp://mautic:${RABBITMQ_PASSWORD}@${server_ip}:5672/%2F"
 }
 EOF
-    echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/mautic${SUFFIX}_output.json${RESET}"
+
+echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/mautic${SUFFIX}_output.json${RESET}"
+
+# Enviar dados para o webhook
+echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
+WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
+  -H "Content-Type: application/json" \
+  -d "${WEBHOOK_DATA}" \
+  -w "\n%{http_code}")
+
+HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
+WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
+    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
+else
+    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
+    echo "Resposta: ${WEBHOOK_BODY}"
+fi
+
+# Esperar que os containers sejam criados
+echo -e "${VERDE}Aguardando 20 segundos para garantir que os containers sejam criados...${RESET}"
+sleep 20
+
+# CORREÇÃO 5: Detectar o container do Mautic para gerar comandos cron externos
+CONTAINER_ID=$(docker ps --filter "name=${MAUTIC_STACK_NAME}_mautic" --format "{{.ID}}")
+
+if [ -z "$CONTAINER_ID" ]; then
+    echo -e "${AMARELO}Não foi possível detectar o container do Mautic para gerar crons.${RESET}"
+else
+    echo -e "${VERDE}Container do Mautic detectado: ${CONTAINER_ID}${RESET}"
+    
+    # Determinar o caminho do PHP dentro do container
+    PHP_PATH=$(docker exec -i ${CONTAINER_ID} which php 2>/dev/null || echo "/usr/bin/php")
+    echo -e "${VERDE}Caminho do PHP detectado: ${PHP_PATH}${RESET}"
+
+    CRON_SEGMENTS_UPDATE="*/5 * * * * docker exec -i ${CONTAINER_ID} ${PHP_PATH} /var/www/html/bin/console mautic:segments:update >> /var/log/mautic_segments.log 2>&1"
+    CRON_CAMPAIGNS_UPDATE="*/5 * * * * docker exec -i ${CONTAINER_ID} ${PHP_PATH} /var/www/html/bin/console mautic:campaigns:update >> /var/log/mautic_campaigns_update.log 2>&1"
+    CRON_CAMPAIGNS_TRIGGER="*/5 * * * * docker exec -i ${CONTAINER_ID} ${PHP_PATH} /var/www/html/bin/console mautic:campaigns:trigger >> /var/log/mautic_campaigns_trigger.log 2>&1"
+
+    # Salvar crons no .txt de credenciais
+    {
+        echo ""
+        echo "Mautic Crons para adicionar no crontab:"
+        echo "${CRON_SEGMENTS_UPDATE}"
+        echo "${CRON_CAMPAIGNS_UPDATE}"
+        echo "${CRON_CAMPAIGNS_TRIGGER}"
+    } >> "${CREDENTIALS_DIR}/mautic${SUFFIX}.txt"
+
+    # Atualizar o JSON de saída
+    jq ". + {
+      crons: {
+        segments_update: \"${CRON_SEGMENTS_UPDATE}\",
+        campaigns_update: \"${CRON_CAMPAIGNS_UPDATE}\",
+        campaigns_trigger: \"${CRON_CAMPAIGNS_TRIGGER}\"
+      }
+    }" /tmp/mautic${SUFFIX}_output.json > /tmp/mautic${SUFFIX}_output_tmp.json && mv /tmp/mautic${SUFFIX}_output_tmp.json /tmp/mautic${SUFFIX}_output.json
 fi
 
 # Verificar status dos serviços
