@@ -38,6 +38,30 @@ done
 PORTAINER_USER="admin"                     # Usuário do Portainer
 RABBITMQ_STACK_NAME="rabbitmq${SUFFIX}"    # Nome da stack RabbitMQ
 
+# NOVO: Definir portas com base no sufixo ou ID
+# Se não houver sufixo, faremos um incremento na porta padrão
+if [ -z "$SUFFIX" ]; then
+    # Use o último dígito do ID da instalação como offset para a porta se ID existir
+    if [ "$INSTALLATION_ID" != "sem_id" ]; then
+        LAST_DIGIT=${INSTALLATION_ID: -1}
+        AMQP_PORT=$((5673 + LAST_DIGIT))
+        MGMT_PORT=$((15673 + LAST_DIGIT))
+    else
+        # Senão, use portas padrão + 10 (ou qualquer número que quiser)
+        AMQP_PORT=5682
+        MGMT_PORT=15682
+    fi
+else
+    # Se há sufixo, use como um identificador para as portas
+    # Converter o sufixo para um número (hash simples)
+    SUFFIX_VALUE=$(echo "${SUFFIX}" | tr -d '_' | md5sum | tr -cd '0-9' | cut -c 1-2)
+    AMQP_PORT=$((5673 + SUFFIX_VALUE))
+    MGMT_PORT=$((15673 + SUFFIX_VALUE))
+fi
+
+echo "Usando porta AMQP: $AMQP_PORT"
+echo "Usando porta de gerenciamento: $MGMT_PORT"
+
 # Cores para formatação
 AMARELO="\e[33m"
 VERDE="\e[32m"
@@ -86,8 +110,8 @@ services:
     image: rabbitmq:3.12-management
     hostname: rabbitmq-server
     ports:
-      - 15672:15672  # Interface de gerenciamento
-      - 5672:5672    # Conexão AMQP
+      - ${MGMT_PORT}:15672  # Interface de gerenciamento - porta modificada
+      - ${AMQP_PORT}:5672    # Conexão AMQP - porta modificada
     environment:
       - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_ADMIN_PASSWORD}
@@ -378,7 +402,7 @@ WEBHOOK_DATA=$(cat << EOF
     "domain": "${RABBITMQ_DOMAIN}",
     "admin_user": "${RABBITMQ_DEFAULT_USER}",
     "admin_password": "${RABBITMQ_ADMIN_PASSWORD}",
-    "amqp_uri": "amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
+    "amqp_uri": "amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:${AMQP_PORT}/%2F"
   },
   "stacks": {
     "rabbitmq": "${RABBITMQ_STACK_NAME}"
@@ -399,7 +423,7 @@ RabbitMQ Information
 URL: https://${RABBITMQ_DOMAIN}
 Usuário Admin: ${RABBITMQ_DEFAULT_USER}
 Senha do Admin: ${RABBITMQ_ADMIN_PASSWORD}
-AMQP URI: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F
+AMQP URI: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:${AMQP_PORT}/%2F
 EOF
     chmod 600 "${CREDENTIALS_DIR}/rabbitmq${SUFFIX}.txt"
     echo -e "${VERDE}Credenciais do RabbitMQ salvas em ${CREDENTIALS_DIR}/rabbitmq${SUFFIX}.txt${RESET}"
@@ -414,8 +438,8 @@ cat << EOF > /tmp/rabbitmq${SUFFIX}_output.json
   "adminUser": "${RABBITMQ_DEFAULT_USER}",
   "adminPassword": "${RABBITMQ_ADMIN_PASSWORD}",
   "rabbitmqStackName": "${RABBITMQ_STACK_NAME}",
-  "amqpUri": "amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F",
-  "directUrl": "http://${server_ip}:15672"
+  "amqpUri": "amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:${AMQP_PORT}/%2F",
+  "directUrl": "http://${server_ip}:${MGMT_PORT}"
 }
 EOF
 
@@ -445,21 +469,21 @@ docker service ps ${RABBITMQ_STACK_NAME}_rabbitmq --no-trunc
 echo "---------------------------------------------"
 echo -e "${VERDE}[ RabbitMQ - INSTALAÇÃO COMPLETA ]${RESET}"
 echo -e "${VERDE}URL:${RESET} https://${RABBITMQ_DOMAIN}"
-echo -e "${VERDE}URL Direta:${RESET} http://${server_ip}:15672"
+echo -e "${VERDE}URL Direta:${RESET} http://${server_ip}:${MGMT_PORT}"
 echo -e "${VERDE}Credenciais de acesso ao painel:${RESET}"
 echo -e "  ${VERDE}Usuário:${RESET} ${RABBITMQ_DEFAULT_USER}"
 echo -e "  ${VERDE}Senha:${RESET} ${RABBITMQ_ADMIN_PASSWORD}"
-echo -e "${VERDE}AMQP URI:${RESET} amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F"
+echo -e "${VERDE}AMQP URI:${RESET} amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:${AMQP_PORT}/%2F"
 echo -e "${VERDE}Stack criada com sucesso:${RESET}"
 echo -e "  - ${BEGE}${RABBITMQ_STACK_NAME}${RESET}"
 echo -e "${VERDE}Acesse o painel do RabbitMQ através do endereço:${RESET} https://${RABBITMQ_DOMAIN}"
-echo -e "${VERDE}Ou diretamente via:${RESET} http://${server_ip}:15672"
+echo -e "${VERDE}Ou diretamente via:${RESET} http://${server_ip}:${MGMT_PORT}"
 echo -e "${VERDE}A stack está disponível e editável no Portainer.${RESET}"
 
 # Instruções adicionais para uso do RabbitMQ
 echo -e "${VERDE}Portas padrão do RabbitMQ:${RESET}"
-echo -e "  - ${BEGE}5672:${RESET} AMQP 0-9-1 e 1.0 (principal)"
-echo -e "  - ${BEGE}15672:${RESET} Interface de gerenciamento HTTP (exposta diretamente)"
+echo -e "  - ${BEGE}${AMQP_PORT}:${RESET} AMQP 0-9-1 e 1.0 (principal)"
+echo -e "  - ${BEGE}${MGMT_PORT}:${RESET} Interface de gerenciamento HTTP (exposta diretamente)"
 echo -e "  - ${BEGE}15692:${RESET} Prometheus metrics"
 echo -e "${VERDE}Para conectar aplicações, use a URI:${RESET}"
-echo -e "${BEGE}amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:5672/%2F${RESET}"
+echo -e "${BEGE}amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_ADMIN_PASSWORD}@${RABBITMQ_STACK_NAME}_rabbitmq:${AMQP_PORT}/%2F${RESET}"
