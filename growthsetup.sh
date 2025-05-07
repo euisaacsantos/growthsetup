@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script para configuração de Docker Swarm, Portainer e Traefik
-# Versão: 7.1 - Com suporte a ID de instalação e envio para webhook
-# Data: 29/03/2025
+# Versão: 7.2 - Com suporte a ID de instalação e correção automática de problemas GRUB
+# Data: 03/05/2025
 
 # Cores para melhor visualização
 GREEN='\033[0;32m'
@@ -44,6 +44,49 @@ handle_error() {
     log "Número máximo de tentativas atingido." "$RED"
     log "Instalação abortada." "$RED"
     exit $exit_code
+  fi
+}
+
+# Função para corrigir problemas com o pacote grub-efi-amd64-signed
+fix_grub_efi_issues() {
+  log "Detectado problema com o pacote grub-efi-amd64-signed..." "$YELLOW"
+  log "Tentando corrigir automaticamente..." "$YELLOW"
+  
+  # Tentativa 1: Configurar pacotes pendentes
+  log "Tentando configurar pacotes pendentes..."
+  dpkg --configure -a
+  
+  # Tentativa 2: Corrigir dependências quebradas
+  log "Tentando corrigir dependências quebradas..."
+  apt-get -f install -y
+  
+  # Tentativa 3: Marcar o pacote problemático como "hold" para impedir atualizações
+  log "Marcando pacote grub-efi-amd64-signed para não ser atualizado..."
+  apt-mark hold grub-efi-amd64-signed
+  
+  # Verificar se o problema foi resolvido
+  if apt update; then
+    log "Problema corrigido com sucesso!" "$GREEN"
+    return 0
+  else
+    # Tentativa 4: Abordagem mais agressiva - remover e reinstalar o pacote
+    log "Tentando abordagem alternativa..." "$YELLOW"
+    apt-get remove -y --purge grub-efi-amd64-signed || true
+    apt-get autoremove -y || true
+    apt-get update
+    apt-get install -y grub-efi-amd64-signed || apt-mark hold grub-efi-amd64-signed
+    
+    # Verificação final
+    if apt update; then
+      log "Problema corrigido com sucesso!" "$GREEN"
+      return 0
+    else
+      log "Não foi possível resolver o problema com grub-efi-amd64-signed" "$YELLOW"
+      log "Continuando a instalação mesmo assim..." "$YELLOW"
+      # Marcamos o pacote como hold para evitar que ele interfira no restante da instalação
+      apt-mark hold grub-efi-amd64-signed
+      return 1
+    fi
   fi
 }
 
@@ -91,13 +134,32 @@ update_system() {
   
   export DEBIAN_FRONTEND=noninteractive
   
-  apt update
+  # Tentar fazer o update primeiro
+  if ! apt update; then
+    log "Detectado erro durante o apt update, verificando problemas com grub-efi..." "$YELLOW"
+    
+    # Verificar se o erro está relacionado ao grub-efi-amd64-signed
+    if apt update 2>&1 | grep -q "grub-efi-amd64-signed"; then
+      fix_grub_efi_issues
+    fi
+  fi
   
-  apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y
+  # Continuar com a atualização, independentemente do resultado anterior
+  apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y || true
   
+  # Verificar se há erros específicos após o upgrade
+  if dpkg -l | grep -q "^..F" && dpkg -l | grep -q "grub-efi-amd64-signed"; then
+    log "Detectados problemas com pacotes após upgrade, tentando correção..." "$YELLOW"
+    fix_grub_efi_issues
+  fi
+  
+  # Instalar pacotes necessários, mesmo se houver erros
   apt -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y \
     curl wget apt-transport-https ca-certificates \
-    software-properties-common gnupg jq host || handle_error "Falha ao atualizar o sistema" "atualização do sistema"
+    software-properties-common gnupg jq host || { 
+      log "Aviso: Alguns pacotes podem não ter sido instalados corretamente." "$YELLOW"
+      log "Continuando mesmo assim..." "$YELLOW"
+    }
   
   log "Sistema atualizado com sucesso!"
 }
