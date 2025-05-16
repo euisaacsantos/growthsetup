@@ -178,7 +178,7 @@ services:
       - REDIS_HOST=redis${SUFFIX}
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - REDIS_SSL=false
+      - REDIS_SSL="false"
       - REDIS_KEY_PREFIX=a2a:
       - REDIS_TTL=3600
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
@@ -186,7 +186,7 @@ services:
       - EMAIL_FROM=${EMAIL_FROM}
       - APP_URL=${APP_URL}
       - LOG_LEVEL=INFO
-      - DEBUG=false
+      - DEBUG="false"
     volumes:
       - evoai_logs${SUFFIX}:/app/logs
       - evoai_static${SUFFIX}:/app/static
