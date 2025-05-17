@@ -20,6 +20,9 @@ PORTAINER_PASSWORD="$3"             # Senha do Portainer
 # Inicializar variáveis
 SUFFIX=""
 INSTALLATION_ID="sem_id"
+POSTGRES_PASSWORD_GENERATED=$(openssl rand -hex 16)
+REDIS_PASSWORD_GENERATED=$(openssl rand -hex 16)
+JWT_SECRET_KEY_GENERATED=$(openssl rand -hex 32)
 
 # Processar parâmetros opcionais (sufixo e ID)
 for param in "${@:4}"; do
@@ -55,10 +58,19 @@ error_exit() {
     exit 1
 }
 
+# Gerar credenciais e segredos
+echo -e "${VERDE}Gerando credenciais e segredos...${RESET}"
+echo -e "Credenciais geradas:"
+echo -e "Senha PostgreSQL: ${BEGE}${POSTGRES_PASSWORD_GENERATED}${RESET}"
+echo -e "Senha Redis: ${BEGE}${REDIS_PASSWORD_GENERATED}${RESET}"
+echo -e "JWT Secret Key: ${BEGE}${JWT_SECRET_KEY_GENERATED}${RESET}"
+
 # Criar volumes Docker necessários
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
-docker volume create "evo-ai-redis-data${SUFFIX}" 2>/dev/null || echo "Volume evo-ai-redis-data${SUFFIX} já existe."
-docker volume create "evo-ai-postgres-data${SUFFIX}" 2>/dev/null || echo "Volume evo-ai-postgres-data${SUFFIX} já existe."
+docker volume create "evoai_redis_data${SUFFIX}" 2>/dev/null || echo "Volume evoai_redis_data${SUFFIX} já existe."
+docker volume create "evoai_postgres_data${SUFFIX}" 2>/dev/null || echo "Volume evoai_postgres_data${SUFFIX} já existe."
+docker volume create "evoai_static${SUFFIX}" 2>/dev/null || echo "Volume evoai_static${SUFFIX} já existe."
+docker volume create "evoai_logs${SUFFIX}" 2>/dev/null || echo "Volume evoai_logs${SUFFIX} já existe."
 
 # Criar rede overlay se não existir
 docker network create --driver overlay GrowthNet 2>/dev/null || echo "Rede GrowthNet já existe."
@@ -75,11 +87,11 @@ services:
       - --appendonly
       - "yes"
       - --requirepass
-      - ""
+      - "${REDIS_PASSWORD_GENERATED}"
     ports:
       - "6379:6379"
     volumes:
-      - "evo-ai-redis-data${SUFFIX}:/data"
+      - "evoai_redis_data${SUFFIX}:/data"
     networks:
       - GrowthNet
     deploy:
@@ -90,9 +102,9 @@ services:
         - node.role == manager
 
 volumes:
-  "evo-ai-redis-data${SUFFIX}":
+  "evoai_redis_data${SUFFIX}":
     external: true
-    name: "evo-ai-redis-data${SUFFIX}"
+    name: "evoai_redis_data${SUFFIX}"
 
 networks:
   GrowthNet:
@@ -109,12 +121,12 @@ services:
     image: postgres:14-alpine
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD_GENERATED}"
       POSTGRES_DB: evo_ai${SUFFIX}
     ports:
       - "5432:5432"
     volumes:
-      - "evo-ai-postgres-data${SUFFIX}:/var/lib/postgresql/data"
+      - "evoai_postgres_data${SUFFIX}:/var/lib/postgresql/data"
     networks:
       - GrowthNet
     deploy:
@@ -125,9 +137,9 @@ services:
         - node.role == manager
 
 volumes:
-  "evo-ai-postgres-data${SUFFIX}":
+  "evoai_postgres_data${SUFFIX}":
     external: true
-    name: "evo-ai-postgres-data${SUFFIX}"
+    name: "evoai_postgres_data${SUFFIX}"
 
 networks:
   GrowthNet:
@@ -137,8 +149,6 @@ EOL
 
 # Criar arquivo docker-compose para a stack Evo AI
 echo -e "${VERDE}Criando arquivo docker-compose para a stack Evo AI...${RESET}"
-# Gerar uma chave JWT aleatória se não houver uma fornecida
-JWT_SECRET_KEY_DEFAULT=$(openssl rand -hex 32)
 cat > "${EVO_AI_STACK_NAME}.yaml" <<EOL
 version: "3.8"
 services:
@@ -150,19 +160,19 @@ services:
     ports:
       - "8000:8000"
     environment:
-      POSTGRES_CONNECTION_STRING: postgresql://postgres:postgres@postgres${SUFFIX}:5432/evo_ai${SUFFIX}
-      REDIS_HOST: redis${SUFFIX}
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ""
+      POSTGRES_CONNECTION_STRING: "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}"
+      REDIS_HOST: "redis${SUFFIX}"
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD_GENERATED}"
       REDIS_SSL: "false"
       REDIS_KEY_PREFIX: "a2a:"
-      REDIS_TTL: 3600
-      JWT_SECRET_KEY: "\${JWT_SECRET_KEY:-${JWT_SECRET_KEY_DEFAULT}}"
-      SENDGRID_API_KEY: "\${SENDGRID_API_KEY}"
-      EMAIL_FROM: "\${EMAIL_FROM}"
+      REDIS_TTL: "3600"
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY_GENERATED}"
+      SENDGRID_API_KEY: ""
+      EMAIL_FROM: ""
       APP_URL: "https://${EVO_AI_DOMAIN}"
-      LOG_LEVEL: "\${LOG_LEVEL:-INFO}"
-      DEBUG: "\${DEBUG:-false}"
+      LOG_LEVEL: "INFO"
+      DEBUG: "false"
     volumes:
       - "./evoai_logs${SUFFIX}:/app/logs"
       - "./evoai_static${SUFFIX}:/app/static"
@@ -194,12 +204,12 @@ services:
     image: postgres:14-alpine
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD_GENERATED}"
       POSTGRES_DB: evo_ai${SUFFIX}
     ports:
       - "5432:5432"
     volumes:
-      - "evo-ai-postgres-data${SUFFIX}:/var/lib/postgresql/data"
+      - "evoai_postgres_data${SUFFIX}:/var/lib/postgresql/data"
     networks:
       - GrowthNet
     healthcheck:
@@ -222,11 +232,11 @@ services:
       - --appendonly
       - "yes"
       - --requirepass
-      - ""
+      - "${REDIS_PASSWORD_GENERATED}"
     ports:
       - "6379:6379"
     volumes:
-      - "evo-ai-redis-data${SUFFIX}:/data"
+      - "evoai_redis_data${SUFFIX}:/data"
     networks:
       - GrowthNet
     healthcheck:
@@ -242,12 +252,14 @@ services:
         - node.role == manager
 
 volumes:
-  "evo-ai-postgres-data${SUFFIX}":
+  "evoai_postgres_data${SUFFIX}":
     external: true
-    name: "evo-ai-postgres-data${SUFFIX}"
-  "evo-ai-redis-data${SUFFIX}":
+    name: "evoai_postgres_data${SUFFIX}"
+  "evoai_redis_data${SUFFIX}":
     external: true
-    name: "evo-ai-redis-data${SUFFIX}"
+    name: "evoai_redis_data${SUFFIX}"
+  "evoai_static${SUFFIX}":
+  "evoai_logs${SUFFIX}":
 
 networks:
   GrowthNet:
@@ -361,17 +373,4 @@ echo -e "ID do Swarm: ${BEGE}${SWARM_ID}${RESET}"
 
 # Função para processar a criação ou atualização de uma stack
 process_stack() {
-    local stack_name=$1
-    local yaml_file="${stack_name}.yaml"
-
-    echo -e "${VERDE}Processando stack: ${BEGE}${stack_name}${RESET}"
-
-    # Verificar se a stack já existe
-    STACK_LIST_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/stacks" \
-        -H "Authorization: Bearer ${JWT_TOKEN}" \
-        -w "\n%{http_code}")
-
-    HTTP_CODE=$(echo "$STACK_LIST_RESPONSE" | tail -n1)
-    STACK_LIST_BODY=$(echo "$STACK_LIST_RESPONSE" | sed '$d')
-
-    if [ "$HTTP_CODE" -ne 200 ]; then
+    local
