@@ -1,31 +1,34 @@
 #!/bin/bash
-# Script para criar stacks separadas no Portainer para Evo AI (API, Redis e PostgreSQL)
-# Uso: ./install-evo-ai.sh <portainer_url> <evo_ai_domain> <portainer_password> [sufixo] [id-xxxx]
-# Exemplo: ./install-evo-ai.sh painel.growthtap.com.br evoai.growthtap.com.br senha123 cliente1 id-9876543210
-# Ou sem sufixo: ./install-evo-ai.sh painel.growthtap.com.br evoai.trafegocomia.com senha123 "" id-9876543210
+# Script para criar stacks separadas no Portainer para Evo AI (API e Frontend)
+# Uso: ./install-evo-ai.sh <portainer_url> <evo_ai_domain_api> <evo_ai_domain_front> <portainer_password> <admin_email> <admin_password> [sufixo] [id-xxxx]
+# Exemplo: ./install-evo-ai.sh painel.trafegocomia.com api.trafegocomia.com front.trafegocomia.com senha123 admin@email.com.br admin123 cliente1 id-12341221125
+# Ou sem sufixo: ./install-evo-ai.sh painel.trafegocomia.com api.trafegocomia.com front.trafegocomia.com senha123 admin@email.com.br admin123 "" id-12341221125
 
 # Verificar parâmetros obrigatórios
-if [ $# -lt 3 ]; then
-    echo "Uso: $0 <portainer_url> <evo_ai_domain> <portainer_password> [sufixo] [id-xxxx]"
-    echo "Exemplo: $0 painel.trafegocomia.com evoai.trafegocomia.com senha123 cliente1 id-9876543210"
-    echo "Sem sufixo: $0 painel.trafegocomia.com evoai.trafegocomia.com senha123 \"\" id-9876543210"
+if [ $# -lt 6 ]; then
+    echo "Uso: $0 <portainer_url> <evo_ai_domain_api> <evo_ai_domain_front> <portainer_password> <admin_email> <admin_password> [sufixo] [id-xxxx]"
+    echo "Exemplo: $0 painel.trafegocomia.com api.trafegocomia.com front.trafegocomia.com senha123 admin@email.com.br admin123 cliente1 id-12341221125"
+    echo "Sem sufixo: $0 painel.trafegocomia.com api.trafegocomia.com front.trafegocomia.com senha123 admin@email.com.br admin123 \"\" id-12341221125"
     exit 1
 fi
 
 # Capturar parâmetros da linha de comando
-PORTAINER_URL="https://$1"         # URL do Portainer
-EVO_AI_DOMAIN="$2"                  # Domínio para a Evo AI
-PORTAINER_PASSWORD="$3"             # Senha do Portainer
+PORTAINER_URL="https://$1"           # URL do Portainer
+EVO_AI_DOMAIN_API="$2"            # Domínio para a API Evo AI
+EVO_AI_DOMAIN_FRONT="$3"          # Domínio para o Frontend Evo AI
+PORTAINER_PASSWORD="$4"         # Senha do Portainer
+ADMIN_EMAIL="$5"                   # Email do administrador
+ADMIN_PASSWORD="$6"            # Senha do administrador
 
 # Inicializar variáveis
 SUFFIX=""
 INSTALLATION_ID="sem_id"
-POSTGRES_PASSWORD_GENERATED=$(openssl rand -hex 16)
-REDIS_PASSWORD_GENERATED=$(openssl rand -hex 16)
-JWT_SECRET_KEY_GENERATED=$(openssl rand -hex 32)
+REDIS_PASSWORD_GENERATED=$(openssl rand -hex 16) # Gera senha Redis
+EVO_AI_ENCRYPTION_KEY=$(openssl rand -hex 32)  # Chave de criptografia
+EVO_AI_JWT_SECRET_KEY=$(openssl rand -hex 32)      # Chave JWT
 
 # Processar parâmetros opcionais (sufixo e ID)
-for param in "${@:4}"; do
+for param in "${@:7}"; do
     # Verificar se o parâmetro começa com 'id-'
     if [[ "$param" == id-* ]]; then
         INSTALLATION_ID="${param#id-}"  # Remover o prefixo 'id-'
@@ -42,6 +45,10 @@ PORTAINER_USER="admin"              # Usuário do Portainer
 EVO_AI_STACK_NAME="evoai${SUFFIX}"   # Nome da stack Evo AI
 REDIS_STACK_NAME="evoai_redis${SUFFIX}" # Nome da stack Redis com prefixo evoai_
 PG_STACK_NAME="evoai_postgres${SUFFIX}"  # Nome da stack PostgreSQL com prefixo evoai_
+GROWTHNET_NAME="growthnet${SUFFIX}" # Nome da rede
+SMTP_USE_TLS="true" # Valores padrão
+SMTP_USE_SSL="false"
+nome_rede_interna="growthnet${SUFFIX}"
 
 WEBHOOK_URL="https://setup.growthtap.com.br/webhook/bf813e80-f036-400b-acae-904d703df6dd"
 
@@ -61,19 +68,19 @@ error_exit() {
 # Gerar credenciais e segredos
 echo -e "${VERDE}Gerando credenciais e segredos...${RESET}"
 echo -e "Credenciais geradas:"
-echo -e "Senha PostgreSQL: ${BEGE}${POSTGRES_PASSWORD_GENERATED}${RESET}"
 echo -e "Senha Redis: ${BEGE}${REDIS_PASSWORD_GENERATED}${RESET}"
-echo -e "JWT Secret Key: ${BEGE}${JWT_SECRET_KEY_GENERATED}${RESET}"
+echo -e "Chave de Criptografia: ${BEGE}${EVO_AI_ENCRYPTION_KEY}${RESET}"
+echo -e "Chave JWT: ${BEGE}${EVO_AI_JWT_SECRET_KEY}${RESET}"
 
 # Criar volumes Docker necessários
 echo -e "${VERDE}Criando volumes Docker...${RESET}"
 docker volume create "evoai_redis_data${SUFFIX}" 2>/dev/null || echo "Volume evoai_redis_data${SUFFIX} já existe."
 docker volume create "evoai_postgres_data${SUFFIX}" 2>/dev/null || echo "Volume evoai_postgres_data${SUFFIX} já existe."
-docker volume create "evoai_static${SUFFIX}" 2>/dev/null || echo "Volume evoai_static${SUFFIX} já existe."
 docker volume create "evoai_logs${SUFFIX}" 2>/dev/null || echo "Volume evoai_logs${SUFFIX} já existe."
+docker volume create "evoai_static${SUFFIX}" 2>/dev/null || echo "Volume evoai_static${SUFFIX} já existe."
 
 # Criar rede overlay se não existir
-docker network create --driver overlay GrowthNet 2>/dev/null || echo "Rede GrowthNet já existe."
+docker network create --driver overlay ${GROWTHNET_NAME} 2>/dev/null || echo "Rede ${GROWTHNET_NAME} já existe."
 
 # Criar arquivo docker-compose para a stack Redis
 echo -e "${VERDE}Criando arquivo docker-compose para a stack Redis...${RESET}"
@@ -93,7 +100,7 @@ services:
     volumes:
       - "evoai_redis_data${SUFFIX}:/data"
     networks:
-      - GrowthNet
+      - ${GROWTHNET_NAME}
     deploy:
       mode: replicated
       replicas: 1
@@ -107,9 +114,9 @@ volumes:
     name: "evoai_redis_data${SUFFIX}"
 
 networks:
-  GrowthNet:
+  ${GROWTHNET_NAME}:
     external: true
-    name: GrowthNet
+    name: ${GROWTHNET_NAME}
 EOL
 
 # Criar arquivo docker-compose para a stack PostgreSQL
@@ -121,14 +128,14 @@ services:
     image: postgres:14-alpine
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD_GENERATED}"
-      POSTGRES_DB: evo_ai${SUFFIX}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_GENERATED}
+      POSTGRES_DB: evoai${SUFFIX}
     ports:
       - "5432:5432"
     volumes:
       - "evoai_postgres_data${SUFFIX}:/var/lib/postgresql/data"
     networks:
-      - GrowthNet
+      - ${GROWTHNET_NAME}
     deploy:
       mode: replicated
       replicas: 1
@@ -142,48 +149,51 @@ volumes:
     name: "evoai_postgres_data${SUFFIX}"
 
 networks:
-  GrowthNet:
+  ${GROWTHNET_NAME}:
     external: true
-    name: GrowthNet
+    name: ${GROWTHNET_NAME}
 EOL
 
 # Criar arquivo docker-compose para a stack Evo AI
 echo -e "${VERDE}Criando arquivo docker-compose para a stack Evo AI...${RESET}"
 cat > "${EVO_AI_STACK_NAME}.yaml" <<EOL
-version: "3.8"
+version: "3.7"
 services:
-  api${SUFFIX}:
-    image: evo-ai-api:latest
-    depends_on:
-      - postgres${SUFFIX}
-      - redis${SUFFIX}
-    ports:
-      - "8000:8000"
-    environment:
-      POSTGRES_CONNECTION_STRING: "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}"
-      REDIS_HOST: "redis${SUFFIX}"
-      REDIS_PORT: "6379"
-      REDIS_PASSWORD: "${REDIS_PASSWORD_GENERATED}"
-      REDIS_SSL: "false"
-      REDIS_KEY_PREFIX: "a2a:"
-      REDIS_TTL: "3600"
-      JWT_SECRET_KEY: "${JWT_SECRET_KEY_GENERATED}"
-      SENDGRID_API_KEY: ""
-      EMAIL_FROM: ""
-      APP_URL: "https://${EVO_AI_DOMAIN}"
-      LOG_LEVEL: "INFO"
-      DEBUG: "false"
+
+  evoai_api${SUFFIX}:
+    image: evoapicloud/evo-ai:latest
     volumes:
-      - "./evoai_logs${SUFFIX}:/app/logs"
-      - "./evoai_static${SUFFIX}:/app/static"
+      - "evoai_logs${SUFFIX}:/app/logs"
+      - "evoai_static${SUFFIX}:/app/static"
     networks:
-      - GrowthNet
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 15s
+      - ${GROWTHNET_NAME}
+    environment:
+      - API_URL=https://${EVO_AI_DOMAIN_API}
+      - APP_URL=https://${EVO_AI_DOMAIN_FRONT}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - ADMIN_INITIAL_PASSWORD=${ADMIN_PASSWORD}
+      - EMAIL_PROVIDER=smtp
+      - SMTP_FROM=\${SMTP_EMAIL:-}
+      - SMTP_USER=\${SMTP_USER:-}
+      - SMTP_PASSWORD=\${SMTP_PASS:-}
+      - SMTP_HOST=\${SMTP_HOST:-}
+      - SMTP_PORT=\${SMTP_PORT:-587}
+      - SMTP_USE_TLS=${SMTP_USE_TLS}
+      - SMTP_USE_SSL=${SMTP_USE_SSL}
+      - POSTGRES_CONNECTION_STRING=postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evoai${SUFFIX}
+      - REDIS_HOST=redis${SUFFIX}
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - REDIS_KEY_PREFIX=a2a${SUFFIX}
+      - REDIS_SSL=false
+      - REDIS_TTL=3600
+      - TOOLS_CACHE_TTL=3600
+      - ENCRYPTION_KEY=${EVO_AI_ENCRYPTION_KEY}
+      - JWT_SECRET_KEY=${EVO_AI_JWT_SECRET_KEY}
+      - JWT_ALGORITHM=HS256
+      - JWT_EXPIRATION_TIME=3600
+      - LOG_LEVEL=INFO
+      - LOG_DIR=logs
     deploy:
       mode: replicated
       replicas: 1
@@ -192,79 +202,55 @@ services:
         - node.role == manager
       labels:
         - traefik.enable=true
-        - traefik.http.routers.evoai${SUFFIX}.rule=Host(\"\${EVO_AI_DOMAIN}\")
-        - traefik.http.routers.evoai${SUFFIX}.entrypoints=websecure
-        - traefik.http.routers.evoai${SUFFIX}.priority=1
-        - traefik.http.routers.evoai${SUFFIX}.tls.certresolver=letsencryptresolver
-        - traefik.http.routers.evoai${SUFFIX}.service=evoai${SUFFIX}
-        - traefik.http.services.evoai${SUFFIX}.loadbalancer.server.port=8000
-        - traefik.http.services.evoai${SUFFIX}.loadbalancer.passHostHeader=1
+        - traefik.http.routers.evoai_api${SUFFIX}.rule=Host(\"${EVO_AI_DOMAIN_API}\")
+        - traefik.http.routers.evoai_api${SUFFIX}.entrypoints=websecure
+        - traefik.http.routers.evoai_api${SUFFIX}.priority=1
+        - traefik.http.routers.evoai_api${SUFFIX}.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.evoai_api${SUFFIX}.service=evoai_api${SUFFIX}
+        - traefik.http.services.evoai_api${SUFFIX}.loadbalancer.server.port=8000
+        - traefik.http.services.evoai_api${SUFFIX}.loadbalancer.passHostHeader=true
 
-  postgres${SUFFIX}:
-    image: postgres:14-alpine
+  evoai_frontend${SUFFIX}:
+    image: evoapicloud/evo-ai-frontend:latest
+    networks:
+      - ${GROWTHNET_NAME}
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD_GENERATED}"
-      POSTGRES_DB: evo_ai${SUFFIX}
-    ports:
-      - "5432:5432"
-    volumes:
-      - "evoai_postgres_data${SUFFIX}:/var/lib/postgresql/data"
-    networks:
-      - GrowthNet
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      - NEXT_PUBLIC_API_URL=https://${EVO_AI_DOMAIN_API}
     deploy:
       mode: replicated
       replicas: 1
       placement:
         constraints:
         - node.role == manager
-
-  redis${SUFFIX}:
-    image: redis:alpine
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --requirepass
-      - "${REDIS_PASSWORD_GENERATED}"
-    ports:
-      - "6379:6379"
-    volumes:
-      - "evoai_redis_data${SUFFIX}:/data"
-    networks:
-      - GrowthNet
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 30s
-      retries: 50
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-        - node.role == manager
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.evoai_frontend${SUFFIX}.rule=Host(\"${EVO_AI_DOMAIN_FRONT}\")
+        - traefik.http.routers.evoai_frontend${SUFFIX}.entrypoints=websecure
+        - traefik.http.routers.evoai_frontend${SUFFIX}.priority=1
+        - traefik.http.routers.evoai_frontend${SUFFIX}.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.evoai_frontend${SUFFIX}.service=evoai_frontend${SUFFIX}
+        - traefik.http.services.evoai_frontend${SUFFIX}.loadbalancer.server.port=3000
+        - traefik.http.services.evoai_frontend${SUFFIX}.loadbalancer.passHostHeader=true
 
 volumes:
+  "evoai_logs${SUFFIX}":
+    external: true
+    name: "evoai_logs${SUFFIX}"
+  "evoai_static${SUFFIX}":
+    external: true
+    name: "evoai_static${SUFFIX}"
   "evoai_postgres_data${SUFFIX}":
     external: true
     name: "evoai_postgres_data${SUFFIX}"
   "evoai_redis_data${SUFFIX}":
     external: true
     name: "evoai_redis_data${SUFFIX}"
-  "evoai_static${SUFFIX}":
-  "evoai_logs${SUFFIX}":
 
 networks:
-  GrowthNet:
+  ${GROWTHNET_NAME}:
     external: true
-    name: GrowthNet
+    name: ${GROWTHNET_NAME}
+
 EOL
 
 # Verificar se jq está instalado
@@ -486,7 +472,7 @@ process_stack() {
     rm -f "$erro_output" "$response_output"
 }
 
-# Implementar stacks na ordem correta: primeiro Redis e PostgreSQL, depois Evolution
+# Implementar stacks na ordem correta: primeiro Redis e PostgreSQL, depois Evo AI
 echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
 
 # Processar Redis primeiro
@@ -501,7 +487,7 @@ if [ $? -ne 0 ]; then
     echo -e "${AMARELO}Aviso: Problemas ao implementar PostgreSQL, mas continuando...${RESET}"
 fi
 
-# Processar Evolution por último (depende dos outros)
+# Processar Evo AI por último (depende dos outros)
 # Adicionar uma pausa para garantir que os serviços anteriores sejam inicializados
 echo -e "${VERDE}Aguardando 10 segundos para inicialização dos serviços Redis e PostgreSQL...${RESET}"
 sleep 10
@@ -523,15 +509,19 @@ WEBHOOK_DATA=$(cat << EOF
   "timestamp": "${timestamp}",
   "hostname": "${hostname}",
   "server_ip": "${server_ip}",
-  "link": "https://${EVO_AI_DOMAIN}",
+  "link_api": "https://${EVO_AI_DOMAIN_API}",
+  "link_front": "https://${EVO_AI_DOMAIN_FRONT}",  
+  "admin_email": "${ADMIN_EMAIL}",
+  "admin_password": "${ADMIN_PASSWORD}",
   "postgres_password": "${POSTGRES_PASSWORD_GENERATED}",
-  "redis_password": "${REDIS_PASSWORD_GENERATED}",
-  "jwt_secret_key": "${JWT_SECRET_KEY_GENERATED}",
+  "redis_password": "${REDIS_PASSWORD_GENERATED}",  
   "evolution_ai": {
-    "domain": "${EVO_AI_DOMAIN}",
-    "postgres_uri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}",
+    "domain_api": "${EVO_AI_DOMAIN_API}",
+    "domain_front": "${EVO_AI_DOMAIN_FRONT}",
+    "postgres_uri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evoai${SUFFIX}",
     "redis_uri": "redis://redis${SUFFIX}:6379",
-    "jwt_secret_key": "${JWT_SECRET_KEY_GENERATED}"
+    "encryption_key": "${EVO_AI_ENCRYPTION_KEY}",
+    "jwt_secret_key": "${EVO_AI_JWT_SECRET_KEY}"
   },
   "stacks": {
     "redis": "${REDIS_STACK_NAME}",
@@ -550,11 +540,15 @@ if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
 
     cat > "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt" << EOF
 Evo AI Installation Credentials
-URL: https://${EVO_AI_DOMAIN}
+Application URL (Frontend): https://${EVO_AI_DOMAIN_FRONT}
+API URL: https://${EVO_AI_DOMAIN_API}
+Admin Email: ${ADMIN_EMAIL}
+Admin Password: ${ADMIN_PASSWORD}
 PostgreSQL Password: ${POSTGRES_PASSWORD_GENERATED}
 Redis Password: ${REDIS_PASSWORD_GENERATED}
-JWT Secret Key: ${JWT_SECRET_KEY_GENERATED}
-PostgreSQL URI: postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}
+Encryption Key: ${EVO_AI_ENCRYPTION_KEY}
+JWT Secret Key: ${EVO_AI_JWT_SECRET_KEY}
+PostgreSQL URI: postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evoai${SUFFIX}
 Redis URI: redis://redis${SUFFIX}:6379
 EOF
     chmod 600 "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt"
@@ -566,14 +560,18 @@ fi
 # Criar um objeto JSON de saída para o relatório local
 cat << EOF > /tmp/evoai${SUFFIX}_output.json
 {
-  "url": "https://${EVO_AI_DOMAIN}",
+  "applicationUrl": "https://${EVO_AI_DOMAIN_FRONT}",
+  "apiUrl": "https://${EVO_AI_DOMAIN_API}",
+  "adminEmail": "${ADMIN_EMAIL}",
+  "adminPassword": "${ADMIN_PASSWORD}",
   "postgresPassword": "${POSTGRES_PASSWORD_GENERATED}",
   "redisPassword": "${REDIS_PASSWORD_GENERATED}",
-  "jwtSecretKey": "${JWT_SECRET_KEY_GENERATED}",
+  "encryptionKey": "${EVO_AI_ENCRYPTION_KEY}",
+  "jwtSecretKey": "${EVO_AI_JWT_SECRET_KEY}",
   "redisStackName": "${REDIS_STACK_NAME}",
   "postgresStackName": "${PG_STACK_NAME}",
   "evolutionAiStackName": "${EVO_AI_STACK_NAME}",
-  "postgresUri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}",
+  "postgresUri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evoai${SUFFIX}",
   "redisUri": "redis://redis${SUFFIX}:6379"
 }
 EOF
@@ -599,7 +597,8 @@ fi
 
 echo "---------------------------------------------"
 echo -e "${VERDE}[ EVO AI - INSTALAÇÃO COMPLETA ]${RESET}"
-echo -e "${VERDE}URL da Aplicação:${RESET} https://${EVO_AI_DOMAIN}"
+echo -e "${VERDE}URL da Aplicação (Frontend):${RESET} https://${EVO_AI_DOMAIN_FRONT}"
+echo -e "${VERDE}URL da API:${RESET} https://${EVO_AI_DOMAIN_API}"
 echo -e "${VERDE}Credenciais e URIs salvas em /root/.credentials/evoai${SUFFIX}.txt e /tmp/evoai${SUFFIX}_output.json${RESET}"
 echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
 echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
