@@ -1,8 +1,8 @@
 #!/bin/bash
 # Script para criar stacks separadas no Portainer para Evo AI (API, Redis e PostgreSQL)
 # Uso: ./install-evo-ai.sh <portainer_url> <evo_ai_domain> <portainer_password> [sufixo] [id-xxxx]
-# Exemplo: ./install-evo-ai.sh painel.trafegocomia.com evoai.trafegocomia.com senha123 cliente1 id-9876543210
-# Ou sem sufixo: ./install-evo-ai.sh painel.trafegocomia.com evoai.trafegocomia.com senha123 "" id-9876543210
+# Exemplo: ./install-evo-ai.sh painel.growthtap.com.br evoai.growthtap.com.br senha123 cliente1 id-9876543210
+# Ou sem sufixo: ./install-evo-ai.sh painel.growthtap.com.br evoai.trafegocomia.com senha123 "" id-9876543210
 
 # Verificar parâmetros obrigatórios
 if [ $# -lt 3 ]; then
@@ -192,7 +192,7 @@ services:
         - node.role == manager
       labels:
         - traefik.enable=true
-        - traefik.http.routers.evoai${SUFFIX}.rule=Host(\`${EVO_AI_DOMAIN}\`)
+        - traefik.http.routers.evoai${SUFFIX}.rule=Host(\"\${EVO_AI_DOMAIN}\")
         - traefik.http.routers.evoai${SUFFIX}.entrypoints=websecure
         - traefik.http.routers.evoai${SUFFIX}.priority=1
         - traefik.http.routers.evoai${SUFFIX}.tls.certresolver=letsencryptresolver
@@ -373,4 +373,236 @@ echo -e "ID do Swarm: ${BEGE}${SWARM_ID}${RESET}"
 
 # Função para processar a criação ou atualização de uma stack
 process_stack() {
-    local
+    local stack_name=$1
+    local yaml_file="${stack_name}.yaml"
+
+    echo -e "${VERDE}Processando stack: ${BEGE}${stack_name}${RESET}"
+
+    # Verificar se a stack já existe
+    STACK_LIST_RESPONSE=$(curl -k -s -X GET "${PORTAINER_URL}/api/stacks" \
+        -H "Authorization: Bearer ${JWT_TOKEN}" \
+        -w "\n%{http_code}")
+
+    HTTP_CODE=$(echo "$STACK_LIST_RESPONSE" | tail -n1)
+    STACK_LIST_BODY=$(echo "$STACK_LIST_RESPONSE" | sed '$d')
+
+    if [ "$HTTP_CODE" -ne 200 ]; then
+        echo -e "${AMARELO}Aviso: Não foi possível verificar stacks existentes. Código HTTP: ${HTTP_CODE}${RESET}"
+        echo "Continuando mesmo assim..."
+    else
+        # Verificar se uma stack com o mesmo nome já existe
+        EXISTING_STACK_ID=$(echo "$STACK_LIST_BODY" | grep -o "\"Id\":[0-9]*,\"Name\":\"${stack_name}\"" | grep -o '"Id":[0-9]*' | grep -o '[0-9]*')
+
+        if [ ! -z "$EXISTING_STACK_ID" ]; then
+            echo -e "${AMARELO}Uma stack com o nome '${stack_name}' já existe (ID: ${EXISTING_STACK_ID})${RESET}"
+            echo -e "${VERDE}Removendo a stack existente para recriá-la...${RESET}"
+
+            # Remover a stack existente
+            DELETE_RESPONSE=$(curl -k -s -X DELETE "${PORTAINER_URL}/api/stacks/${EXISTING_STACK_ID}?endpointId=${ENDPOINT_ID}" \
+                -H "Authorization: Bearer ${JWT_TOKEN}" \
+                -w "\n%{http_code}")
+
+            HTTP_CODE=$(echo "$DELETE_RESPONSE" | tail -n1)
+            DELETE_BODY=$(echo "$DELETE_RESPONSE" | sed '$d')
+
+            if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 204 ]; then
+                echo -e "${AMARELO}Aviso: Não foi possível remover a stack existente. Código HTTP: ${HTTP_CODE}${RESET}"
+                echo "Continuando mesmo assim..."
+            else
+                echo -e "${VERDE}Stack existente removida com sucesso.${RESET}"
+            fi
+
+            # Aguardar um momento para garantir que a stack foi removida
+            sleep 3
+        fi
+    fi
+
+    # Criar arquivo temporário para capturar a saída de erro e a resposta
+    erro_output=$(mktemp)
+    response_output=$(mktemp)
+
+    # Enviar a stack usando o endpoint multipart do Portainer
+    echo -e "${VERDE}Enviando a stack ${stack_name} para o Portainer...${RESET}"
+    http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+        -H "Authorization: Bearer ${JWT_TOKEN}" \
+        -F "Name=${stack_name}" \
+        -F "file=@$(pwd)/${yaml_file}" \
+        -F "SwarmID=${SWARM_ID}" \
+        -F "endpointId=${ENDPOINT_ID}" \
+        "${PORTAINER_URL}/api/stacks/create/swarm/file" 2> "$erro_output")
+
+    response_body=$(cat "$response_output")
+
+    if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+        # Verifica o conteúdo da resposta para garantir que o deploy foi bem-sucedido
+        if echo "$response_body" | grep -q "\"Id\""; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso!${RESET}"
+            return 0
+        else
+            echo -e "${VERMELHO}Erro, resposta inesperada do servidor ao tentar efetuar deploy da stack ${BEGE}${stack_name}${RESET}.${RESET}"
+            echo "Resposta do servidor: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+        fi
+    else
+        echo -e "${VERMELHO}Erro ao efetuar deploy. Resposta HTTP: ${http_code}${RESET}"
+        echo "Mensagem de erro: $(cat "$erro_output")"
+        echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+
+        # Tentar método alternativo se falhar
+        echo -e "${AMARELO}Tentando método alternativo de deploy...${RESET}"
+        # Tenta com outro endpoint do Portainer (método 2)
+        http_code=$(curl -s -o "$response_output" -w "%{http_code}" -k -X POST \
+            -H "Authorization: Bearer ${JWT_TOKEN}" \
+            -H "Content-Type: multipart/form-data" \
+            -F "Name=${stack_name}" \
+            -F "file=@$(pwd)/${yaml_file}" \
+            -F "SwarmID=${SWARM_ID}" \
+            -F "endpointId=${ENDPOINT_ID}" \
+            "${PORTAINER_URL}/api/stacks/create/file?endpointId=${ENDPOINT_ID}&type=1" 2> "$erro_output")
+
+        response_body=$(cat "$response_output")
+
+        if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
+            echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso (método alternativo)!${RESET}"
+            return 0
+        else
+            echo -e "${VERMELHO}Erro ao efetuar deploy pelo método alternativo. Resposta HTTP: ${http_code}${RESET}"
+            echo "Mensagem de erro: $(cat "$erro_output")"
+            echo "Detalhes: $(echo "$response_body" | jq . 2>/dev/null || echo "$response_body")"
+
+            # Último recurso - usar o Docker diretamente
+            echo -e "${AMARELO}Tentando deploy direto via Docker Swarm...${RESET}"
+            if docker stack deploy --prune --resolve-image always -c "${yaml_file}" "${stack_name}"; then
+                echo -e "${VERDE}Deploy da stack ${BEGE}${stack_name}${RESET}${VERDE} feito com sucesso via Docker Swarm!${RESET}"
+                echo -e "${AMARELO}Nota: A stack pode não ser editável no Portainer.${RESET}"
+                return 0
+            else
+                echo -e "${VERMELHO}Falha em todos os métodos de deploy da stack ${stack_name}.${RESET}"
+                return 1
+            fi
+        fi
+    fi
+
+    # Remove os arquivos temporários
+    rm -f "$erro_output" "$response_output"
+}
+
+# Implementar stacks na ordem correta: primeiro Redis e PostgreSQL, depois Evolution
+echo -e "${VERDE}Iniciando deploy das stacks em sequência...${RESET}"
+
+# Processar Redis primeiro
+process_stack "$REDIS_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar Redis, mas continuando...${RESET}"
+fi
+
+# Processar PostgreSQL segundo
+process_stack "$PG_STACK_NAME"
+if [ $? -ne 0 ]; then
+    echo -e "${AMARELO}Aviso: Problemas ao implementar PostgreSQL, mas continuando...${RESET}"
+fi
+
+# Processar Evolution por último (depende dos outros)
+# Adicionar uma pausa para garantir que os serviços anteriores sejam inicializados
+echo -e "${VERDE}Aguardando 10 segundos para inicialização dos serviços Redis e PostgreSQL...${RESET}"
+sleep 10
+
+process_stack "$EVO_AI_STACK_NAME"
+if [ $? -ne 0 ]; then
+    error_exit "Falha ao implementar a stack Evo AI."
+fi
+
+# Preparar os dados para o webhook
+timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+hostname=$(hostname)
+server_ip=$(hostname -I | awk '{print $1}')
+
+# Criar objeto JSON para o webhook
+WEBHOOK_DATA=$(cat << EOF
+{
+  "installation_id": "${INSTALLATION_ID}",
+  "timestamp": "${timestamp}",
+  "hostname": "${hostname}",
+  "server_ip": "${server_ip}",
+  "link": "https://${EVO_AI_DOMAIN}",
+  "postgres_password": "${POSTGRES_PASSWORD_GENERATED}",
+  "redis_password": "${REDIS_PASSWORD_GENERATED}",
+  "jwt_secret_key": "${JWT_SECRET_KEY_GENERATED}",
+  "evolution_ai": {
+    "domain": "${EVO_AI_DOMAIN}",
+    "postgres_uri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}",
+    "redis_uri": "redis://redis${SUFFIX}:6379",
+    "jwt_secret_key": "${JWT_SECRET_KEY_GENERATED}"
+  },
+  "stacks": {
+    "redis": "${REDIS_STACK_NAME}",
+    "postgres": "${PG_STACK_NAME}",
+    "evolution_ai": "${EVO_AI_STACK_NAME}"
+  },
+  "suffix": "${SUFFIX}"
+}
+EOF
+)
+
+# Salvar credenciais
+CREDENTIALS_DIR="/root/.credentials"
+if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
+    chmod 700 "$CREDENTIALS_DIR"
+
+    cat > "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt" << EOF
+Evo AI Installation Credentials
+URL: https://${EVO_AI_DOMAIN}
+PostgreSQL Password: ${POSTGRES_PASSWORD_GENERATED}
+Redis Password: ${REDIS_PASSWORD_GENERATED}
+JWT Secret Key: ${JWT_SECRET_KEY_GENERATED}
+PostgreSQL URI: postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}
+Redis URI: redis://redis${SUFFIX}:6379
+EOF
+    chmod 600 "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt"
+    echo -e "${VERDE}Credenciais da Evo AI salvas em ${CREDENTIALS_DIR}/evoai${SUFFIX}.txt${RESET}"
+else
+    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
+fi
+
+# Criar um objeto JSON de saída para o relatório local
+cat << EOF > /tmp/evoai${SUFFIX}_output.json
+{
+  "url": "https://${EVO_AI_DOMAIN}",
+  "postgresPassword": "${POSTGRES_PASSWORD_GENERATED}",
+  "redisPassword": "${REDIS_PASSWORD_GENERATED}",
+  "jwtSecretKey": "${JWT_SECRET_KEY_GENERATED}",
+  "redisStackName": "${REDIS_STACK_NAME}",
+  "postgresStackName": "${PG_STACK_NAME}",
+  "evolutionAiStackName": "${EVO_AI_STACK_NAME}",
+  "postgresUri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}",
+  "redisUri": "redis://redis${SUFFIX}:6379"
+}
+EOF
+
+echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/evoai${SUFFIX}_output.json${RESET}"
+
+# Enviar dados para o webhook
+echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
+WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
+  -H "Content-Type: application/json" \
+  -d "${WEBHOOK_DATA}" \
+  -w "\n%{http_code}")
+
+HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
+WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
+    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
+else
+    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
+    echo "Resposta: ${WEBHOOK_BODY}"
+fi
+
+echo "---------------------------------------------"
+echo -e "${VERDE}[ EVO AI - INSTALAÇÃO COMPLETA ]${RESET}"
+echo -e "${VERDE}URL da Aplicação:${RESET} https://${EVO_AI_DOMAIN}"
+echo -e "${VERDE}Credenciais e URIs salvas em /root/.credentials/evoai${SUFFIX}.txt e /tmp/evoai${SUFFIX}_output.json${RESET}"
+echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
+echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${EVO_AI_STACK_NAME}${RESET}"
+echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
