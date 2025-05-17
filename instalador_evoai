@@ -199,8 +199,8 @@ services:
       - JWT_SECRET_KEY=${EVO_AI_JWT_SECRET_KEY}
       - JWT_ALGORITHM=HS256
       - JWT_EXPIRATION_TIME=3600
-      - LOG_LEVEL=INFO
-      - LOG_DIR=logs
+      - LOG_LEVEL: "INFO"
+      - LOG_DIR: "logs"
     deploy:
       mode: replicated
       replicas: 1
@@ -612,3 +612,4 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${EVO_AI_STACK_NAME}${RESET}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
+
