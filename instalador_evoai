@@ -45,8 +45,8 @@ PORTAINER_USER="admin"              # Usuário do Portainer
 EVO_AI_STACK_NAME="evoai${SUFFIX}"   # Nome da stack Evo AI
 REDIS_STACK_NAME="evoai_redis${SUFFIX}" # Nome da stack Redis com prefixo evoai_
 PG_STACK_NAME="evoai_postgres${SUFFIX}"  # Nome da stack PostgreSQL com prefixo evoai_
-GROWTHNET_NAME="growthnet${SUFFIX}" # Nome da rede em minúsculo
-nome_rede_interna="growthnet${SUFFIX}" # Nome da rede em minúsculo
+GROWTHNET_NAME="GrowthNet${SUFFIX}" # Nome da rede em maiúsculo
+nome_rede_interna="GrowthNet${SUFFIX}" # Nome da rede em maiúsculo
 SMTP_USE_TLS="true" # Valores padrão
 SMTP_USE_SSL="false"
 
@@ -80,7 +80,7 @@ docker volume create "evoai_postgres_data${SUFFIX}" 2>/dev/null || echo "Volume 
 docker volume create "evoai_logs${SUFFIX}" 2>/dev/null || echo "Volume evoai_logs${SUFFIX} já existe."
 docker volume create "evoai_static${SUFFIX}" 2>/dev/null || echo "Volume evoai_static${SUFFIX} já existe."
 
-# Criar rede overlay se não existir, usando nome em minúsculo
+# Criar rede overlay se não existir, usando nome em maiúsculo
 echo -e "${VERDE}Verificando se a rede ${GROWTHNET_NAME} existe...${RESET}"
 docker network inspect "${GROWTHNET_NAME}" >/dev/null 2>&1 || {
     echo -e "${VERDE}Rede ${GROWTHNET_NAME} não encontrada. Criando...${RESET}"
