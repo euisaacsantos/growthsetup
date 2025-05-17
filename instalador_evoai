@@ -13,7 +13,7 @@ if [ $# -lt 6 ]; then
 fi
 
 # Capturar parâmetros da linha de comando
-PORTAINER_URL="https://$1"           # URL do Portainer
+PORTAINER_URL="https://$1"         # URL do Portainer
 EVO_AI_DOMAIN_API="$2"            # Domínio para a API Evo AI
 EVO_AI_DOMAIN_FRONT="$3"          # Domínio para o Frontend Evo AI
 PORTAINER_PASSWORD="$4"         # Senha do Portainer
@@ -80,7 +80,14 @@ docker volume create "evoai_logs${SUFFIX}" 2>/dev/null || echo "Volume evoai_log
 docker volume create "evoai_static${SUFFIX}" 2>/dev/null || echo "Volume evoai_static${SUFFIX} já existe."
 
 # Criar rede overlay se não existir
-docker network create --driver overlay ${GROWTHNET_NAME} 2>/dev/null || echo "Rede ${GROWTHNET_NAME} já existe."
+echo -e "${VERDE}Verificando se a rede ${GROWTHNET_NAME} existe...${RESET}"
+docker network inspect "${GROWTHNET_NAME}" >/dev/null 2>&1 || {
+    echo -e "${VERDE}Rede ${GROWTHNET_NAME} não encontrada. Criando...${RESET}"
+    docker network create --driver overlay "${GROWTHNET_NAME}" || {
+        error_exit "Falha ao criar a rede Docker Swarm ${GROWTHNET_NAME}. Verifique se o Docker Swarm está inicializado corretamente."
+    }
+    echo -e "${VERDE}Rede Docker Swarm ${GROWTHNET_NAME} criada com sucesso.${RESET}"
+} || echo -e "${VERDE}Rede ${GROWTHNET_NAME} já existe.${RESET}"
 
 # Criar arquivo docker-compose para a stack Redis
 echo -e "${VERDE}Criando arquivo docker-compose para a stack Redis...${RESET}"
@@ -98,7 +105,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - "evoai_redis_data${SUFFIX}:/data"
+      - "evo-ai-redis-data${SUFFIX}:/data"
     networks:
       - ${GROWTHNET_NAME}
     deploy:
@@ -109,9 +116,9 @@ services:
         - node.role == manager
 
 volumes:
-  "evoai_redis_data${SUFFIX}":
+  "evo-ai-redis-data${SUFFIX}":
     external: true
-    name: "evoai_redis_data${SUFFIX}"
+    name: "evo-ai-redis-data${SUFFIX}"
 
 networks:
   ${GROWTHNET_NAME}:
@@ -129,11 +136,11 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_GENERATED}
-      POSTGRES_DB: evoai${SUFFIX}
+      POSTGRES_DB: evo_ai${SUFFIX}
     ports:
       - "5432:5432"
     volumes:
-      - "evoai_postgres_data${SUFFIX}:/var/lib/postgresql/data"
+      - "evo-ai-postgres-data${SUFFIX}:/var/lib/postgresql/data"
     networks:
       - ${GROWTHNET_NAME}
     deploy:
@@ -144,9 +151,9 @@ services:
         - node.role == manager
 
 volumes:
-  "evoai_postgres_data${SUFFIX}":
+  "evo-ai-postgres-data${SUFFIX}":
     external: true
-    name: "evoai_postgres_data${SUFFIX}"
+    name: "evo-ai-postgres-data${SUFFIX}"
 
 networks:
   ${GROWTHNET_NAME}:
@@ -180,14 +187,13 @@ services:
       - SMTP_PORT=\${SMTP_PORT:-587}
       - SMTP_USE_TLS=${SMTP_USE_TLS}
       - SMTP_USE_SSL=${SMTP_USE_SSL}
-      - POSTGRES_CONNECTION_STRING=postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evoai${SUFFIX}
+      - POSTGRES_CONNECTION_STRING=postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}
       - REDIS_HOST=redis${SUFFIX}
       - REDIS_PORT=6379
-      - REDIS_DB=0
-      - REDIS_KEY_PREFIX=a2a${SUFFIX}
-      - REDIS_SSL=false
-      - REDIS_TTL=3600
-      - TOOLS_CACHE_TTL=3600
+      - REDIS_PASSWORD: "${REDIS_PASSWORD_GENERATED}"
+      - REDIS_SSL: "false"
+      - REDIS_KEY_PREFIX: "a2a:"
+      - REDIS_TTL: 3600
       - ENCRYPTION_KEY=${EVO_AI_ENCRYPTION_KEY}
       - JWT_SECRET_KEY=${EVO_AI_JWT_SECRET_KEY}
       - JWT_ALGORITHM=HS256
@@ -239,12 +245,12 @@ volumes:
   "evoai_static${SUFFIX}":
     external: true
     name: "evoai_static${SUFFIX}"
-  "evoai_postgres_data${SUFFIX}":
+  "evoai_postgres-data${SUFFIX}":
     external: true
-    name: "evoai_postgres_data${SUFFIX}"
-  "evoai_redis_data${SUFFIX}":
+    name: "evoai_postgres-data${SUFFIX}"
+  "evoai_redis-data${SUFFIX}":
     external: true
-    name: "evoai_redis_data${SUFFIX}"
+    name: "evoai_redis-data${SUFFIX}"
 
 networks:
   ${GROWTHNET_NAME}:
@@ -518,7 +524,7 @@ WEBHOOK_DATA=$(cat << EOF
   "evolution_ai": {
     "domain_api": "${EVO_AI_DOMAIN_API}",
     "domain_front": "${EVO_AI_DOMAIN_FRONT}",
-    "postgres_uri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evoai${SUFFIX}",
+    "postgres_uri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}",
     "redis_uri": "redis://redis${SUFFIX}:6379",
     "encryption_key": "${EVO_AI_ENCRYPTION_KEY}",
     "jwt_secret_key": "${EVO_AI_JWT_SECRET_KEY}"
@@ -548,7 +554,7 @@ PostgreSQL Password: ${POSTGRES_PASSWORD_GENERATED}
 Redis Password: ${REDIS_PASSWORD_GENERATED}
 Encryption Key: ${EVO_AI_ENCRYPTION_KEY}
 JWT Secret Key: ${EVO_AI_JWT_SECRET_KEY}
-PostgreSQL URI: postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evoai${SUFFIX}
+PostgreSQL URI: postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}
 Redis URI: redis://redis${SUFFIX}:6379
 EOF
     chmod 600 "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt"
@@ -571,7 +577,7 @@ cat << EOF > /tmp/evoai${SUFFIX}_output.json
   "redisStackName": "${REDIS_STACK_NAME}",
   "postgresStackName": "${PG_STACK_NAME}",
   "evolutionAiStackName": "${EVO_AI_STACK_NAME}",
-  "postgresUri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evoai${SUFFIX}",
+  "postgresUri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}",
   "redisUri": "redis://redis${SUFFIX}:6379"
 }
 EOF
