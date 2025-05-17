@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# Create a complete installation script with fixed formatting
+cat > instalador_evoai_fixed << 'EOL'
+#!/bin/bash
 # Script para criar stacks separadas no Portainer para Evo AI (API e Frontend)
 # Uso: ./install-evo-ai.sh <portainer_url> <evo_ai_domain_api> <evo_ai_domain_front> <portainer_password> <admin_email> <admin_password> [sufixo] [id-xxxx]
 # Exemplo: ./install-evo-ai.sh painel.trafegocomia.com api.trafegocomia.com front.trafegocomia.com senha123 admin@email.com.br admin123 cliente1 id-12341221125
@@ -6,7 +10,85 @@
 
 # Verificar parâmetros obrigatórios
 if [ $# -lt 6 ]; then
-    echo "Uso: $0 <portainer_url> <evo_ai_domain_api> <evo_ai_domain_front> <portainer_password> <admin_email> <admin_password> [sufixo] [id-xxxx]"
+    chmod 700 "$CREDENTIALS_DIR"
+
+    cat > "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt" << EOF
+Evo AI Installation Credentials
+Application URL (Frontend): https://${EVO_AI_DOMAIN_FRONT}
+API URL: https://${EVO_AI_DOMAIN_API}
+Admin Email: ${ADMIN_EMAIL}
+Admin Password: ${ADMIN_PASSWORD}
+PostgreSQL Password: ${POSTGRES_PASSWORD_GENERATED}
+Redis Password: ${REDIS_PASSWORD_GENERATED}
+Encryption Key: ${EVO_AI_ENCRYPTION_KEY}
+JWT Secret Key: ${EVO_AI_JWT_SECRET_KEY}
+PostgreSQL URI: postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}
+Redis URI: redis://redis${SUFFIX}:6379
+EOF
+    chmod 600 "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt"
+    echo -e "${VERDE}Credenciais da Evo AI salvas em ${CREDENTIALS_DIR}/evoai${SUFFIX}.txt${RESET}"
+else
+    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
+fi
+
+# Criar um objeto JSON de saída para o relatório local
+cat << EOF > /tmp/evoai${SUFFIX}_output.json
+{
+  "applicationUrl": "https://${EVO_AI_DOMAIN_FRONT}",
+  "apiUrl": "https://${EVO_AI_DOMAIN_API}",
+  "adminEmail": "${ADMIN_EMAIL}",
+  "adminPassword": "${ADMIN_PASSWORD}",
+  "postgresPassword": "${POSTGRES_PASSWORD_GENERATED}",
+  "redisPassword": "${REDIS_PASSWORD_GENERATED}",
+  "encryptionKey": "${EVO_AI_ENCRYPTION_KEY}",
+  "jwtSecretKey": "${EVO_AI_JWT_SECRET_KEY}",
+  "redisStackName": "${REDIS_STACK_NAME}",
+  "postgresStackName": "${PG_STACK_NAME}",
+  "evolutionAiStackName": "${EVO_AI_STACK_NAME}",
+  "postgresUri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}",
+  "redisUri": "redis://redis${SUFFIX}:6379"
+}
+EOF
+
+echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/evoai${SUFFIX}_output.json${RESET}"
+
+# Enviar dados para o webhook
+echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
+WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
+  -H "Content-Type: application/json" \
+  -d "${WEBHOOK_DATA}" \
+  -w "\n%{http_code}")
+
+HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
+WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
+    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
+else
+    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
+    echo "Resposta: ${WEBHOOK_BODY}"
+fi
+
+echo "---------------------------------------------"
+echo -e "${VERDE}[ EVO AI - INSTALAÇÃO COMPLETA ]${RESET}"
+echo -e "${VERDE}URL da Aplicação (Frontend):${RESET} https://${EVO_AI_DOMAIN_FRONT}"
+echo -e "${VERDE}URL da API:${RESET} https://${EVO_AI_DOMAIN_API}"
+echo -e "${VERDE}Credenciais e URIs salvas em /root/.credentials/evoai${SUFFIX}.txt e /tmp/evoai${SUFFIX}_output.json${RESET}"
+echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
+echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
+echo -e "  - ${BEGE}${EVO_AI_STACK_NAME}${RESET}"
+echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
+EOL
+
+# Dar permissão de execução
+chmod +x instalador_evoai_fixed
+
+# Informações sobre uso
+echo -e "Script de instalação corrigido criado: instalador_evoai_fixed"
+echo -e "Para executar o instalador, use o comando:"
+echo -e "./instalador_evoai_fixed painel.growthtap.com.br agents.growthtap.com.br agentsapi.growthtap.com.br Senh@nova123 isaacsantos@growthtap.com.br Senh@nova123 \"\" id-12341221125"
+echo "Uso: $0 <portainer_url> <evo_ai_domain_api> <evo_ai_domain_front> <portainer_password> <admin_email> <admin_password> [sufixo] [id-xxxx]"
     echo "Exemplo: $0 painel.trafegocomia.com api.trafegocomia.com front.trafegocomia.com senha123 admin@email.com.br admin123 cliente1 id-12341221125"
     echo "Sem sufixo: $0 painel.trafegocomia.com api.trafegocomia.com front.trafegocomia.com senha123 admin@email.com.br admin123 \"\" id-12341221125"
     exit 1
@@ -191,16 +273,16 @@ services:
       - POSTGRES_CONNECTION_STRING=postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}
       - REDIS_HOST=redis${SUFFIX}
       - REDIS_PORT=6379
-      - REDIS_PASSWORD: "${REDIS_PASSWORD_GENERATED}"
-      - REDIS_SSL: "false"
-      - REDIS_KEY_PREFIX: "a2a:"
-      - REDIS_TTL: 3600
+      - REDIS_PASSWORD=${REDIS_PASSWORD_GENERATED}
+      - REDIS_SSL=false
+      - REDIS_KEY_PREFIX=a2a:
+      - REDIS_TTL=3600
       - ENCRYPTION_KEY=${EVO_AI_ENCRYPTION_KEY}
       - JWT_SECRET_KEY=${EVO_AI_JWT_SECRET_KEY}
       - JWT_ALGORITHM=HS256
       - JWT_EXPIRATION_TIME=3600
-      - LOG_LEVEL: "INFO"
-      - LOG_DIR: "logs"
+      - LOG_LEVEL=INFO
+      - LOG_DIR=logs
     deploy:
       mode: replicated
       replicas: 1
@@ -543,73 +625,3 @@ EOF
 # Salvar credenciais
 CREDENTIALS_DIR="/root/.credentials"
 if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
-    chmod 700 "$CREDENTIALS_DIR"
-
-    cat > "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt" << EOF
-Evo AI Installation Credentials
-Application URL (Frontend): https://${EVO_AI_DOMAIN_FRONT}
-API URL: https://${EVO_AI_DOMAIN_API}
-Admin Email: ${ADMIN_EMAIL}
-Admin Password: ${ADMIN_PASSWORD}
-PostgreSQL Password: ${POSTGRES_PASSWORD_GENERATED}
-Redis Password: ${REDIS_PASSWORD_GENERATED}
-Encryption Key: ${EVO_AI_ENCRYPTION_KEY}
-JWT Secret Key: ${EVO_AI_JWT_SECRET_KEY}
-PostgreSQL URI: postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}
-Redis URI: redis://redis${SUFFIX}:6379
-EOF
-    chmod 600 "${CREDENTIALS_DIR}/evoai${SUFFIX}.txt"
-    echo -e "${VERDE}Credenciais da Evo AI salvas em ${CREDENTIALS_DIR}/evoai${SUFFIX}.txt${RESET}"
-else
-    echo -e "${AMARELO}Não foi possível criar o diretório de credenciais. As credenciais serão exibidas apenas no console.${RESET}"
-fi
-
-# Criar um objeto JSON de saída para o relatório local
-cat << EOF > /tmp/evoai${SUFFIX}_output.json
-{
-  "applicationUrl": "https://${EVO_AI_DOMAIN_FRONT}",
-  "apiUrl": "https://${EVO_AI_DOMAIN_API}",
-  "adminEmail": "${ADMIN_EMAIL}",
-  "adminPassword": "${ADMIN_PASSWORD}",
-  "postgresPassword": "${POSTGRES_PASSWORD_GENERATED}",
-  "redisPassword": "${REDIS_PASSWORD_GENERATED}",
-  "encryptionKey": "${EVO_AI_ENCRYPTION_KEY}",
-  "jwtSecretKey": "${EVO_AI_JWT_SECRET_KEY}",
-  "redisStackName": "${REDIS_STACK_NAME}",
-  "postgresStackName": "${PG_STACK_NAME}",
-  "evolutionAiStackName": "${EVO_AI_STACK_NAME}",
-  "postgresUri": "postgresql://postgres:${POSTGRES_PASSWORD_GENERATED}@postgres${SUFFIX}:5432/evo_ai${SUFFIX}",
-  "redisUri": "redis://redis${SUFFIX}:6379"
-}
-EOF
-
-echo -e "${VERDE}Arquivo JSON de saída criado em /tmp/evoai${SUFFIX}_output.json${RESET}"
-
-# Enviar dados para o webhook
-echo -e "${VERDE}Enviando dados da instalação para o webhook...${RESET}"
-WEBHOOK_RESPONSE=$(curl -s -X POST "${WEBHOOK_URL}" \
-  -H "Content-Type: application/json" \
-  -d "${WEBHOOK_DATA}" \
-  -w "\n%{http_code}")
-
-HTTP_CODE=$(echo "$WEBHOOK_RESPONSE" | tail -n1)
-WEBHOOK_BODY=$(echo "$WEBHOOK_RESPONSE" | sed '$d')
-
-if [ "$HTTP_CODE" -eq 200 ] || [ "$HTTP_CODE" -eq 201 ] || [ "$HTTP_CODE" -eq 202 ]; then
-    echo -e "${VERDE}Dados enviados com sucesso para o webhook.${RESET}"
-else
-    echo -e "${AMARELO}Aviso: Não foi possível enviar os dados para o webhook. Código HTTP: ${HTTP_CODE}${RESET}"
-    echo "Resposta: ${WEBHOOK_BODY}"
-fi
-
-echo "---------------------------------------------"
-echo -e "${VERDE}[ EVO AI - INSTALAÇÃO COMPLETA ]${RESET}"
-echo -e "${VERDE}URL da Aplicação (Frontend):${RESET} https://${EVO_AI_DOMAIN_FRONT}"
-echo -e "${VERDE}URL da API:${RESET} https://${EVO_AI_DOMAIN_API}"
-echo -e "${VERDE}Credenciais e URIs salvas em /root/.credentials/evoai${SUFFIX}.txt e /tmp/evoai${SUFFIX}_output.json${RESET}"
-echo -e "${VERDE}Stacks criadas com sucesso via API do Portainer:${RESET}"
-echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
-echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
-echo -e "  - ${BEGE}${EVO_AI_STACK_NAME}${RESET}"
-echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
-
