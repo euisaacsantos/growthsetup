@@ -177,7 +177,7 @@ version: '3.7'
 
 services:
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z-cpuv1
     command: server /data --console-address ":9001"
     networks:
       - GrowthNet
