@@ -138,7 +138,7 @@ RESET="\e[0m"
 BEGE="\e[97m"
 
 # Gerar credenciais para o pgAdmin
-PGADMIN_EMAIL="admin@pgadmin.local"
+PGADMIN_EMAIL="admin@pgadmin.com.br"
 PGADMIN_PASSWORD=$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-12)
 log_message "Email do pgAdmin: ${PGADMIN_EMAIL}"
 log_message "Senha do pgAdmin gerada: ${PGADMIN_PASSWORD}"
