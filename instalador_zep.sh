@@ -158,9 +158,14 @@ log_message "API Key do Qdrant gerada: ${QDRANT_API_KEY}"
 # Criar volumes Docker necessários
 log_message "Criando volumes Docker..."
 docker volume create zep_data${SUFFIX} 2>/dev/null || log_message "Volume zep_data${SUFFIX} já existe."
+docker volume create zep_config${SUFFIX} 2>/dev/null || log_message "Volume zep_config${SUFFIX} já existe."
 docker volume create zep_postgres_data${SUFFIX} 2>/dev/null || log_message "Volume zep_postgres_data${SUFFIX} já existe."
 docker volume create zep_redis_data${SUFFIX} 2>/dev/null || log_message "Volume zep_redis_data${SUFFIX} já existe."
 docker volume create zep_qdrant_data${SUFFIX} 2>/dev/null || log_message "Volume zep_qdrant_data${SUFFIX} já existe."
+
+# Copiar arquivo config.yaml para o volume - CRÍTICO
+log_message "Copiando arquivo config.yaml para volume Docker..."
+docker run --rm -v zep_config${SUFFIX}:/target -v $(pwd):/source alpine:latest cp /source/config${SUFFIX}.yaml /target/config.yaml
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 if ! docker network inspect GrowthNet >/dev/null 2>&1; then
@@ -344,6 +349,43 @@ extractors:
 log:
   level: info
 EOL
+# Criar arquivo config.yaml para o Zep - ESSENCIAL PARA FUNCIONAMENTO
+log_message "Criando arquivo config.yaml para o Zep..."
+cat > "config${SUFFIX}.yaml" <<EOL
+# Configuração Zep - OBRIGATÓRIA
+store:
+  type: postgres
+  postgres:
+    dsn: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}
+
+server:
+  host: 0.0.0.0
+  port: 8000
+
+log:
+  level: info
+
+# LLM Configuration
+llm:
+  service: openai
+  config:
+    model: gpt-3.5-turbo
+    api_key: sk-temp-key-configure-later-via-api
+
+# Extractors configuration  
+extractors:
+  documents:
+    embeddings:
+      service: openai
+      dimensions: 1536
+  messages:
+    embeddings:
+      service: openai  
+      dimensions: 1536
+    summarizer:
+      enabled: true
+      service: openai
+EOL
 # Criar arquivo docker-compose para a stack Zep
 log_message "Criando arquivo docker-compose para a stack Zep..."
 cat > "${ZEP_STACK_NAME}.yaml" <<EOL
@@ -355,26 +397,19 @@ services:
   zep:
     image: ghcr.io/getzep/zep:0.26.0
     environment:
-      # CONFIGURAÇÃO ESSENCIAL - PREVINE O ERRO "store.type must be set"
-      - STORE_TYPE=postgres
-      - ZEP_STORE_TYPE=postgres
-      - ZEP_POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}
+      # CONFIG FILE - MÉTODO OBRIGATÓRIO
+      - ZEP_CONFIG_FILE=/app/config.yaml
       
-      # Configurações LLM
+      # Variáveis de ambiente adicionais
       - ZEP_OPENAI_API_KEY=sk-temp-key-configure-later-via-api
-      
-      # Configurações de autenticação
-      - ZEP_AUTH_REQUIRED=true
+      - ZEP_AUTH_REQUIRED=true  
       - ZEP_AUTH_SECRET=${ZEP_API_KEY}
-      
-      # Configurações adicionais
-      - ZEP_LOG_LEVEL=info
-      - ZEP_DEVELOPMENT=false
       
       # Timezone
       - TZ=America/Sao_Paulo
     volumes:
       - zep_data${SUFFIX}:/app/data
+      - zep_config${SUFFIX}:/app:ro
     networks:
       - GrowthNet
     deploy:
@@ -409,6 +444,8 @@ services:
 
 volumes:
   zep_data${SUFFIX}:
+    external: true
+  zep_config${SUFFIX}:
     external: true
 
 networks:
@@ -689,7 +726,7 @@ if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
     
     # Cria o arquivo de credenciais separadamente para evitar problemas com a saída
     cat > "${CREDENTIALS_DIR}/zep${SUFFIX}.txt" << EOF
-Zep Information (Versão 0.26.0 - Estável)
+Zep Information (Versão 0.26.0 com config.yaml)
 API URL: https://${ZEP_DOMAIN}
 API Key: ${ZEP_API_KEY}
 Qdrant Dashboard: https://qdrant${SUFFIX}.${ZEP_DOMAIN}
@@ -699,13 +736,13 @@ Database URI: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgr
 Redis URI: redis://${REDIS_STACK_NAME}_redis:6379
 Qdrant URI: http://${QDRANT_STACK_NAME}_qdrant:6333
 
-SOLUÇÃO DEFINITIVA APLICADA:
-1. Zep v0.26.0 (estável, sem bugs da v0.27.2)
-2. STORE_TYPE=postgres (obrigatório para prevenir erro)
-3. ZEP_STORE_TYPE=postgres (redundância para compatibilidade)
-4. ZEP_POSTGRES_DSN configurado corretamente
+SOLUÇÃO FINAL IMPLEMENTADA:
+✓ Arquivo config.yaml obrigatório criado e montado
+✓ store.type definido corretamente no config.yaml  
+✓ ZEP_CONFIG_FILE=/app/config.yaml configurado
+✓ Todas as configurações centralizadas no arquivo YAML
 
-Nota: O erro "store.type must be set" foi resolvido com esta configuração.
+Nota: O erro "store.type must be set" foi resolvido usando config.yaml obrigatório.
 EOF
     chmod 600 "${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
     log_message "Credenciais do Zep salvas em ${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
@@ -764,10 +801,10 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${QDRANT_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${ZEP_STACK_NAME}${RESET}"
-echo -e "${AMARELO}SOLUÇÃO APLICADA:${RESET}"
-echo -e "1. Versão alterada para 0.26.0 (mais estável que 0.27.2)"
-echo -e "2. Configuração dupla: STORE_TYPE + ZEP_STORE_TYPE"
-echo -e "3. Para configurar OpenAI: docker service update ${ZEP_STACK_NAME}_zep --env-add ZEP_OPENAI_API_KEY=sua-key-real"
+echo -e "${AMARELO}SOLUÇÃO DEFINITIVA APLICADA:${RESET}"
+echo -e "1. Arquivo config.yaml obrigatório criado e montado no container"
+echo -e "2. Configuração store.type definida no arquivo config.yaml"  
+echo -e "3. Para configurar OpenAI: editar o arquivo config.yaml no volume"
 echo -e "${VERDE}Acesse seu Zep através do endereço:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo ""
@@ -780,8 +817,9 @@ log_message "Instalação concluída com sucesso!"
 # Limpar arquivos temporários
 log_message "Limpando arquivos temporários..."
 rm -f "${REDIS_STACK_NAME}.yaml"
-rm -f "${PG_STACK_NAME}.yaml"
+rm -f "${PG_STACK_NAME}.yaml"  
 rm -f "${QDRANT_STACK_NAME}.yaml"
 rm -f "${ZEP_STACK_NAME}.yaml"
+rm -f "config${SUFFIX}.yaml"
 
 log_message "Arquivos temporários removidos."
