@@ -344,9 +344,10 @@ services:
       - ZEP_VECTOR_STORE_URL=http://${QDRANT_STACK_NAME}_qdrant:6333
       - ZEP_VECTOR_STORE_API_KEY=${QDRANT_API_KEY}
       
-      # Configurações de embeddings (OpenAI por padrão)
-      - ZEP_OPENAI_API_KEY=\${OPENAI_API_KEY:-}
+      # Configurações de embeddings (configurável via interface web)
+      - ZEP_EMBEDDING_PROVIDER=openai
       - ZEP_EMBEDDING_DIMENSIONS=1536
+      - ZEP_REQUIRE_AUTH=false
       
       # Configurações de rede
       - ZEP_PORT=8000
@@ -684,7 +685,12 @@ Configuração para aplicações:
 ZEP_API_URL=https://${ZEP_DOMAIN}
 ZEP_API_KEY=${ZEP_API_KEY}
 
-Nota: Configure sua OPENAI_API_KEY nas variáveis de ambiente do container Zep para usar embeddings.
+Configuração pós-instalação:
+1. Acesse https://${ZEP_DOMAIN}/admin para configurar
+2. Configure sua OPENAI_API_KEY na interface web
+3. Ou via API: POST /api/v1/config {"openai_api_key": "sua-key"}
+
+Nota: O Zep permite configurar a API key do OpenAI após a instalação.
 EOF
     chmod 600 "${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
     log_message "Credenciais do Zep salvas em ${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
@@ -742,8 +748,10 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${QDRANT_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${ZEP_STACK_NAME}${RESET}"
-echo -e "${AMARELO}IMPORTANTE:${RESET} Configure sua OPENAI_API_KEY nas variáveis de ambiente"
-echo -e "do container Zep para habilitar os embeddings."
+echo -e "${AMARELO}CONFIGURAÇÃO PENDENTE:${RESET}"
+echo -e "1. Acesse: https://${ZEP_DOMAIN}/admin"
+echo -e "2. Configure sua OPENAI_API_KEY na seção de embeddings"
+echo -e "3. Ou use a API: POST /api/v1/config com {\"openai_api_key\": \"sua-key\"}"
 echo -e "${VERDE}Acesse seu Zep através do endereço:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo ""
