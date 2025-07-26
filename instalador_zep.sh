@@ -163,9 +163,11 @@ docker volume create zep_postgres_data${SUFFIX} 2>/dev/null || log_message "Volu
 docker volume create zep_redis_data${SUFFIX} 2>/dev/null || log_message "Volume zep_redis_data${SUFFIX} já existe."
 docker volume create zep_qdrant_data${SUFFIX} 2>/dev/null || log_message "Volume zep_qdrant_data${SUFFIX} já existe."
 
-# Copiar arquivo zep.yaml para o volume - BASEADO NO OFICIAL
+# Copiar arquivo zep.yaml para o volume - CORRIGIDO O DESTINO
 log_message "Copiando arquivo zep.yaml para volume Docker..."
-docker run --rm -v zep_config${SUFFIX}:/target -v $(pwd):/source alpine:latest cp /source/zep${SUFFIX}.yaml /target/zep.yaml
+# Limpar o volume primeiro
+docker run --rm -v zep_config${SUFFIX}:/target alpine:latest sh -c "rm -f /target/* && cp /source/zep${SUFFIX}.yaml /target/zep.yaml" -v $(pwd):/source || \
+docker run --rm -v zep_config${SUFFIX}:/target -v $(pwd):/source alpine:latest sh -c "rm -f /target/* && cp /source/zep${SUFFIX}.yaml /target/zep.yaml"
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 if ! docker network inspect GrowthNet >/dev/null 2>&1; then
@@ -400,7 +402,7 @@ services:
     image: ghcr.io/getzep/zep:0.26.0
     environment:
       # CONFIG FILE - ARQUIVO ZEP.YAML OFICIAL  
-      - ZEP_CONFIG_FILE=zep.yaml
+      - ZEP_CONFIG_FILE=/app/config/zep.yaml
       
       # Variáveis de ambiente adicionais
       - ZEP_OPENAI_API_KEY=sk-temp-key-configure-later-via-api
@@ -409,7 +411,7 @@ services:
       - TZ=America/Sao_Paulo
     volumes:
       - zep_data${SUFFIX}:/app/data
-      - zep_config${SUFFIX}:/app:ro
+      - zep_config${SUFFIX}:/app/config:ro
     networks:
       - GrowthNet
     deploy:
