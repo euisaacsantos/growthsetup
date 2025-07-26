@@ -1,4 +1,5 @@
-#!/bin/bash
+# Timezone
+      - TZ=America/Sao_Paulo#!/bin/bash
 # Script para criar stacks separadas para Zep no Portainer (Zep, Redis, PostgreSQL e Qdrant)
 # Uso: ./script.sh <portainer_url> <zep_domain> <portainer_password> [sufixo] [id-xxxx]
 # Exemplo: ./script.sh painel.trafegocomia.com zep.growthtap.com.br senha123 cliente1 id-12341221125
@@ -349,12 +350,12 @@ services:
       - ZEP_EMBEDDING_DIMENSIONS=1536
       - ZEP_REQUIRE_AUTH=false
       
+      # Configurações de segurança - Web UI desabilitada para produção
+      - ZEP_SERVER_WEB_ENABLED=false
+      
       # Configurações de rede
       - ZEP_PORT=8000
       - ZEP_HOST=0.0.0.0
-      
-      # Timezone
-      - TZ=America/Sao_Paulo
     volumes:
       - zep_data${SUFFIX}:/app/data
     networks:
@@ -685,12 +686,12 @@ Configuração para aplicações:
 ZEP_API_URL=https://${ZEP_DOMAIN}
 ZEP_API_KEY=${ZEP_API_KEY}
 
-Configuração pós-instalação:
-1. Acesse https://${ZEP_DOMAIN}/admin para configurar
-2. Configure sua OPENAI_API_KEY na interface web
-3. Ou via API: POST /api/v1/config {"openai_api_key": "sua-key"}
+Acesso e segurança:
+1. Web UI desabilitada por segurança (exposta publicamente)
+2. API Key: ${ZEP_API_KEY}
+3. Use SDKs Python/JS para interagir com o Zep
 
-Nota: O Zep permite configurar a API key do OpenAI após a instalação.
+Nota: Para habilitar Web UI, configure ZEP_SERVER_WEB_ENABLED=true (apenas ambientes privados).
 EOF
     chmod 600 "${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
     log_message "Credenciais do Zep salvas em ${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
@@ -748,10 +749,10 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${QDRANT_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${ZEP_STACK_NAME}${RESET}"
-echo -e "${AMARELO}CONFIGURAÇÃO PENDENTE:${RESET}"
-echo -e "1. Acesse: https://${ZEP_DOMAIN}/admin"
-echo -e "2. Configure sua OPENAI_API_KEY na seção de embeddings"
-echo -e "3. Ou use a API: POST /api/v1/config com {\"openai_api_key\": \"sua-key\"}"
+echo -e "${AMARELO}SEGURANÇA:${RESET}"
+echo -e "1. Web UI desabilitada por segurança (exposta publicamente)"
+echo -e "2. Use apenas a API Key: ${ZEP_API_KEY}"
+echo -e "3. Para habilitar Web UI localmente: ZEP_SERVER_WEB_ENABLED=true"
 echo -e "${VERDE}Acesse seu Zep através do endereço:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo ""
