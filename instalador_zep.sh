@@ -158,14 +158,9 @@ log_message "API Key do Qdrant gerada: ${QDRANT_API_KEY}"
 # Criar volumes Docker necessários
 log_message "Criando volumes Docker..."
 docker volume create zep_data${SUFFIX} 2>/dev/null || log_message "Volume zep_data${SUFFIX} já existe."
-docker volume create zep_config${SUFFIX} 2>/dev/null || log_message "Volume zep_config${SUFFIX} já existe."
 docker volume create zep_postgres_data${SUFFIX} 2>/dev/null || log_message "Volume zep_postgres_data${SUFFIX} já existe."
 docker volume create zep_redis_data${SUFFIX} 2>/dev/null || log_message "Volume zep_redis_data${SUFFIX} já existe."
 docker volume create zep_qdrant_data${SUFFIX} 2>/dev/null || log_message "Volume zep_qdrant_data${SUFFIX} já existe."
-
-# Copiar arquivo config.yaml para o volume
-log_message "Copiando arquivo config.yaml para volume Docker..."
-docker run --rm -v zep_config${SUFFIX}:/config -v $(pwd):/source alpine:latest cp /source/config${SUFFIX}.yaml /config
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 if ! docker network inspect GrowthNet >/dev/null 2>&1; then
@@ -360,19 +355,20 @@ services:
   zep:
     image: ghcr.io/getzep/zep:0.27.2
     environment:
-      # Configurações via config.yaml
-      - ZEP_CONFIG_FILE=/app/config.yaml
-      
-      # Variáveis de ambiente necessárias
+      # Configuração essencial - ESTAS SÃO AS VARIÁVEIS CORRETAS
+      - STORE_TYPE=postgres
+      - ZEP_POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
       - ZEP_OPENAI_API_KEY=sk-temp-key-configure-later-via-api
-      - ZEP_AUTH_SECRET=${ZEP_API_KEY}
+      
+      # Configurações opcionais
       - ZEP_AUTH_REQUIRED=true
+      - ZEP_AUTH_SECRET=${ZEP_API_KEY}
+      - ZEP_LOG_LEVEL=info
       
       # Timezone
       - TZ=America/Sao_Paulo
     volumes:
       - zep_data${SUFFIX}:/app/data
-      - zep_config${SUFFIX}:/app/config.yaml:ro
     networks:
       - GrowthNet
     deploy:
@@ -407,8 +403,6 @@ services:
 
 volumes:
   zep_data${SUFFIX}:
-    external: true
-  zep_config${SUFFIX}:
     external: true
 
 networks:
@@ -782,6 +776,5 @@ rm -f "${REDIS_STACK_NAME}.yaml"
 rm -f "${PG_STACK_NAME}.yaml"
 rm -f "${QDRANT_STACK_NAME}.yaml"
 rm -f "${ZEP_STACK_NAME}.yaml"
-rm -f "config${SUFFIX}.yaml"
 
 log_message "Arquivos temporários removidos."
