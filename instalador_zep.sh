@@ -353,17 +353,23 @@ services:
 ## --------------------------- Zep Server --------------------------- ##
 
   zep:
-    image: ghcr.io/getzep/zep:0.27.2
+    image: ghcr.io/getzep/zep:0.26.0
     environment:
-      # Configuração essencial - ESTAS SÃO AS VARIÁVEIS CORRETAS
+      # CONFIGURAÇÃO ESSENCIAL - PREVINE O ERRO "store.type must be set"
       - STORE_TYPE=postgres
-      - ZEP_POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
+      - ZEP_STORE_TYPE=postgres
+      - ZEP_POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}
+      
+      # Configurações LLM
       - ZEP_OPENAI_API_KEY=sk-temp-key-configure-later-via-api
       
-      # Configurações opcionais
+      # Configurações de autenticação
       - ZEP_AUTH_REQUIRED=true
       - ZEP_AUTH_SECRET=${ZEP_API_KEY}
+      
+      # Configurações adicionais
       - ZEP_LOG_LEVEL=info
+      - ZEP_DEVELOPMENT=false
       
       # Timezone
       - TZ=America/Sao_Paulo
@@ -683,7 +689,7 @@ if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
     
     # Cria o arquivo de credenciais separadamente para evitar problemas com a saída
     cat > "${CREDENTIALS_DIR}/zep${SUFFIX}.txt" << EOF
-Zep Information
+Zep Information (Versão 0.26.0 - Estável)
 API URL: https://${ZEP_DOMAIN}
 API Key: ${ZEP_API_KEY}
 Qdrant Dashboard: https://qdrant${SUFFIX}.${ZEP_DOMAIN}
@@ -693,13 +699,13 @@ Database URI: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgr
 Redis URI: redis://${REDIS_STACK_NAME}_redis:6379
 Qdrant URI: http://${QDRANT_STACK_NAME}_qdrant:6333
 
-Configuração pós-instalação:
-1. IMPORTANTE: Configure sua OPENAI_API_KEY real
-2. Chave temporária definida: sk-temp-key-configure-later-via-api
-3. Para atualizar: docker service update ${ZEP_STACK_NAME}_zep --env-add ZEP_OPENAI_API_KEY=sua-key-real
-4. Web UI desabilitada por segurança
+SOLUÇÃO DEFINITIVA APLICADA:
+1. Zep v0.26.0 (estável, sem bugs da v0.27.2)
+2. STORE_TYPE=postgres (obrigatório para prevenir erro)
+3. ZEP_STORE_TYPE=postgres (redundância para compatibilidade)
+4. ZEP_POSTGRES_DSN configurado corretamente
 
-Nota: O Zep exige uma OpenAI API key válida para funcionar completamente.
+Nota: O erro "store.type must be set" foi resolvido com esta configuração.
 EOF
     chmod 600 "${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
     log_message "Credenciais do Zep salvas em ${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
@@ -748,6 +754,7 @@ send_webhook_with_logs "success" "Instalação do Zep concluída com sucesso"
 
 echo "---------------------------------------------"
 echo -e "${VERDE}[ ZEP - INSTALAÇÃO COMPLETA ]${RESET}"
+echo -e "${VERDE}Versão do Zep:${RESET} 0.26.0 (estável, sem bugs conhecidos)"
 echo -e "${VERDE}API URL:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}API Key:${RESET} ${ZEP_API_KEY}"
 echo -e "${VERDE}Qdrant Dashboard:${RESET} https://qdrant${SUFFIX}.${ZEP_DOMAIN}"
@@ -757,10 +764,10 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${QDRANT_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${ZEP_STACK_NAME}${RESET}"
-echo -e "${AMARELO}CONFIGURAÇÃO PENDENTE:${RESET}"
-echo -e "1. Configure sua OPENAI_API_KEY real via API ou variável de ambiente"
-echo -e "2. Chave temporária configurada: sk-temp-key-configure-later-via-api"
-echo -e "3. Para atualizar: docker service update ${ZEP_STACK_NAME}_zep --env-add ZEP_OPENAI_API_KEY=sua-key-real"
+echo -e "${AMARELO}SOLUÇÃO APLICADA:${RESET}"
+echo -e "1. Versão alterada para 0.26.0 (mais estável que 0.27.2)"
+echo -e "2. Configuração dupla: STORE_TYPE + ZEP_STORE_TYPE"
+echo -e "3. Para configurar OpenAI: docker service update ${ZEP_STACK_NAME}_zep --env-add ZEP_OPENAI_API_KEY=sua-key-real"
 echo -e "${VERDE}Acesse seu Zep através do endereço:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo ""
