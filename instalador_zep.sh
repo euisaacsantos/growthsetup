@@ -1,5 +1,4 @@
-# Timezone
-      - TZ=America/Sao_Paulo#!/bin/bash
+#!/bin/bash
 # Script para criar stacks separadas para Zep no Portainer (Zep, Redis, PostgreSQL e Qdrant)
 # Uso: ./script.sh <portainer_url> <zep_domain> <portainer_password> [sufixo] [id-xxxx]
 # Exemplo: ./script.sh painel.trafegocomia.com zep.growthtap.com.br senha123 cliente1 id-12341221125
@@ -334,6 +333,9 @@ services:
       - ZEP_LOG_LEVEL=info
       - ZEP_DEVELOPMENT=false
       
+      # Configurações do store
+      - ZEP_STORE_TYPE=postgres
+      
       # Configurações do banco de dados PostgreSQL
       - ZEP_DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
       
@@ -345,17 +347,20 @@ services:
       - ZEP_VECTOR_STORE_URL=http://${QDRANT_STACK_NAME}_qdrant:6333
       - ZEP_VECTOR_STORE_API_KEY=${QDRANT_API_KEY}
       
-      # Configurações de embeddings (configurável via interface web)
+      # Configurações de embeddings (configurável via API depois)
+      - ZEP_OPENAI_API_KEY=sk-temp-key-configure-later-via-api
       - ZEP_EMBEDDING_PROVIDER=openai
       - ZEP_EMBEDDING_DIMENSIONS=1536
-      - ZEP_REQUIRE_AUTH=false
-      
-      # Configurações de segurança - Web UI desabilitada para produção
-      - ZEP_SERVER_WEB_ENABLED=false
       
       # Configurações de rede
       - ZEP_PORT=8000
       - ZEP_HOST=0.0.0.0
+      
+      # Configurações de segurança - Web UI desabilitada para produção
+      - ZEP_SERVER_WEB_ENABLED=false
+      
+      # Timezone
+      - TZ=America/Sao_Paulo
     volumes:
       - zep_data${SUFFIX}:/app/data
     networks:
@@ -682,16 +687,13 @@ Database URI: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgr
 Redis URI: redis://${REDIS_STACK_NAME}_redis:6379
 Qdrant URI: http://${QDRANT_STACK_NAME}_qdrant:6333
 
-Configuração para aplicações:
-ZEP_API_URL=https://${ZEP_DOMAIN}
-ZEP_API_KEY=${ZEP_API_KEY}
+Configuração pós-instalação:
+1. IMPORTANTE: Configure sua OPENAI_API_KEY real
+2. Chave temporária definida: sk-temp-key-configure-later-via-api
+3. Para atualizar: docker service update ${ZEP_STACK_NAME}_zep --env-add ZEP_OPENAI_API_KEY=sua-key-real
+4. Web UI desabilitada por segurança
 
-Acesso e segurança:
-1. Web UI desabilitada por segurança (exposta publicamente)
-2. API Key: ${ZEP_API_KEY}
-3. Use SDKs Python/JS para interagir com o Zep
-
-Nota: Para habilitar Web UI, configure ZEP_SERVER_WEB_ENABLED=true (apenas ambientes privados).
+Nota: O Zep exige uma OpenAI API key válida para funcionar completamente.
 EOF
     chmod 600 "${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
     log_message "Credenciais do Zep salvas em ${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
@@ -749,10 +751,10 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${QDRANT_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${ZEP_STACK_NAME}${RESET}"
-echo -e "${AMARELO}SEGURANÇA:${RESET}"
-echo -e "1. Web UI desabilitada por segurança (exposta publicamente)"
-echo -e "2. Use apenas a API Key: ${ZEP_API_KEY}"
-echo -e "3. Para habilitar Web UI localmente: ZEP_SERVER_WEB_ENABLED=true"
+echo -e "${AMARELO}CONFIGURAÇÃO PENDENTE:${RESET}"
+echo -e "1. Configure sua OPENAI_API_KEY real via API ou variável de ambiente"
+echo -e "2. Chave temporária configurada: sk-temp-key-configure-later-via-api"
+echo -e "3. Para atualizar: docker service update ${ZEP_STACK_NAME}_zep --env-add ZEP_OPENAI_API_KEY=sua-key-real"
 echo -e "${VERDE}Acesse seu Zep através do endereço:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo ""
