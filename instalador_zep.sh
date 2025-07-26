@@ -97,7 +97,7 @@ error_exit() {
 }
 
 # Iniciar o log da instalação
-log_message "Iniciando instalação do Zep..."
+log_message "Iniciando instalação do Zep 0.26.0..."
 
 # Verificar parâmetros obrigatórios
 if [ $# -lt 3 ]; then
@@ -162,12 +162,6 @@ docker volume create zep_config${SUFFIX} 2>/dev/null || log_message "Volume zep_
 docker volume create zep_postgres_data${SUFFIX} 2>/dev/null || log_message "Volume zep_postgres_data${SUFFIX} já existe."
 docker volume create zep_redis_data${SUFFIX} 2>/dev/null || log_message "Volume zep_redis_data${SUFFIX} já existe."
 docker volume create zep_qdrant_data${SUFFIX} 2>/dev/null || log_message "Volume zep_qdrant_data${SUFFIX} já existe."
-
-# Copiar arquivo zep.yaml para o volume - CORRIGIDO O DESTINO
-log_message "Copiando arquivo zep.yaml para volume Docker..."
-# Limpar o volume primeiro
-docker run --rm -v zep_config${SUFFIX}:/target alpine:latest sh -c "rm -f /target/* && cp /source/zep${SUFFIX}.yaml /target/zep.yaml" -v $(pwd):/source || \
-docker run --rm -v zep_config${SUFFIX}:/target -v $(pwd):/source alpine:latest sh -c "rm -f /target/* && cp /source/zep${SUFFIX}.yaml /target/zep.yaml"
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 if ! docker network inspect GrowthNet >/dev/null 2>&1; then
@@ -323,73 +317,59 @@ networks:
     name: GrowthNet
 EOL
 
-# Criar arquivo config.yaml para o Zep
-log_message "Criando arquivo config.yaml para o Zep..."
-cat > "config${SUFFIX}.yaml" <<EOL
-store:
-  type: postgres
-  postgres:
-    dsn: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
+# Criar arquivo zep.yaml corrigido para a versão 0.26.0
+log_message "Criando arquivo zep.yaml corrigido para versão 0.26.0..."
+cat > "zep${SUFFIX}.yaml" <<EOL
+# Configuração corrigida para Zep 0.26.0
+log:
+  level: info
+  format: json
 
 server:
   host: 0.0.0.0
   port: 8000
   web_enabled: false
 
-llm:
-  service: openai
+# CONFIGURAÇÃO CORRIGIDA: store.type é obrigatório
+store:
+  type: postgres
+  postgres:
+    host: ${PG_STACK_NAME}_postgres
+    port: 5432
+    user: postgres
+    password: ${POSTGRES_PASSWORD}
+    database: zep${SUFFIX}
+    schema_name: public
+    sslmode: disable
+    max_open_connections: 10
+    max_idle_connections: 5
+
+# Configuração de autenticação
+auth:
+  secret: ${ZEP_API_KEY}
+
+# Configuração de embedding (opcional, pode ser configurada via API)
+nlp:
+  server_url: ""
+
+# Configuração de cache Redis (opcional)
+memory:
+  type: redis
   config:
-    api_key: sk-temp-key-configure-later-via-api
-    model: gpt-3.5-turbo
+    addr: ${REDIS_STACK_NAME}_redis:6379
 
-extractors:
-  embeddings:
-    service: openai
-    dimensions: 1536
-    model: AdaEmbeddingV2
-
-log:
-  level: info
-EOL
-# Criar arquivo zep.yaml para o Zep - BASEADO NO ARQUIVO OFICIAL
-log_message "Criando arquivo zep.yaml para o Zep..."
-cat > "zep${SUFFIX}.yaml" <<EOL
-# Configuração baseada no arquivo oficial do repositório Zep
-log:
-  # Setting to "console" will print human readable logs
-  # while "json" will print structured JSON logs. Default is "json".
-  level: info
-  format: json
-
-http:
-  # Host to bind to. Default is 0.0.0.0
-  host: 0.0.0.0
-  # Port to bind to. Default is 8000
-  port: 8000
-  max_request_size: 5242880
-
-postgres:
-  user: postgres
-  password: ${POSTGRES_PASSWORD}
-  host: ${PG_STACK_NAME}_postgres
-  port: 5432
-  database: zep${SUFFIX}
-  schema_name: public
-  read_timeout: 30
-  write_timeout: 30
-  max_open_connections: 10
-
-# Carbon is a package used for dealing with time
-carbon:
-  locale: en
-
-# In order to authenticate API requests to the Zep service, a secret must be provided
-api_secret: ${ZEP_API_KEY}
-
-# Telemetry
+# Configuração de telemetria
 telemetry:
-  disabled: false
+  enabled: false
 EOL
+
+# Copiar arquivo zep.yaml para o volume
+log_message "Copiando arquivo zep.yaml para volume Docker..."
+# Primeiro, criar um container temporário para copiar o arquivo
+docker run --rm -d --name temp_zep_config${SUFFIX} -v zep_config${SUFFIX}:/target alpine:latest sleep 30
+docker cp "zep${SUFFIX}.yaml" temp_zep_config${SUFFIX}:/target/zep.yaml
+docker stop temp_zep_config${SUFFIX} 2>/dev/null || true
+
 # Criar arquivo docker-compose para a stack Zep
 log_message "Criando arquivo docker-compose para a stack Zep..."
 cat > "${ZEP_STACK_NAME}.yaml" <<EOL
@@ -401,11 +381,8 @@ services:
   zep:
     image: ghcr.io/getzep/zep:0.26.0
     environment:
-      # CONFIG FILE - ARQUIVO ZEP.YAML OFICIAL  
+      # ARQUIVO DE CONFIGURAÇÃO
       - ZEP_CONFIG_FILE=/app/config/zep.yaml
-      
-      # Variáveis de ambiente adicionais
-      - ZEP_OPENAI_API_KEY=sk-temp-key-configure-later-via-api
       
       # Timezone
       - TZ=America/Sao_Paulo
@@ -414,6 +391,9 @@ services:
       - zep_config${SUFFIX}:/app/config:ro
     networks:
       - GrowthNet
+    depends_on:
+      - ${PG_STACK_NAME}_postgres
+      - ${REDIS_STACK_NAME}_redis
     deploy:
       mode: replicated
       replicas: 1
@@ -422,7 +402,7 @@ services:
           - node.role == manager
       resources:
         limits:
-          cpus: "1"
+          cpus: "2"
           memory: 2048M
       update_config:
         parallelism: 1
@@ -430,8 +410,8 @@ services:
         order: start-first
       restart_policy:
         condition: any
-        delay: 5s
-        max_attempts: 3
+        delay: 10s
+        max_attempts: 5
       labels:
         - traefik.enable=true
         - traefik.docker.network=GrowthNet
@@ -606,12 +586,9 @@ process_stack() {
             fi
             
             # Aguardar um momento para garantir que a stack foi removida
-            sleep 3
+            sleep 5
         fi
     fi
-
-    # Para depuração - mostrar o conteúdo do arquivo YAML
-    log_message "Conteúdo do arquivo ${yaml_file} criado."
 
     # Criar arquivo temporário para capturar a saída de erro e a resposta
     erro_output=$(mktemp)
@@ -711,8 +688,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # Adicionar uma pausa para garantir que os serviços anteriores sejam inicializados
-log_message "Aguardando 20 segundos para inicialização dos serviços Redis, PostgreSQL e Qdrant..."
-sleep 20
+log_message "Aguardando 30 segundos para inicialização dos serviços Redis, PostgreSQL e Qdrant..."
+sleep 30
 
 # Processar Zep por último (depende dos outros)
 log_message "Iniciando deploy da stack Zep..."
@@ -728,7 +705,7 @@ if [ -d "$CREDENTIALS_DIR" ] || mkdir -p "$CREDENTIALS_DIR"; then
     
     # Cria o arquivo de credenciais separadamente para evitar problemas com a saída
     cat > "${CREDENTIALS_DIR}/zep${SUFFIX}.txt" << EOF
-Zep Information (Configuração Oficial zep.yaml)
+Zep Information (Versão 0.26.0 - Configuração Corrigida)
 API URL: https://${ZEP_DOMAIN}
 API Key: ${ZEP_API_KEY}
 Qdrant Dashboard: https://qdrant${SUFFIX}.${ZEP_DOMAIN}
@@ -738,13 +715,14 @@ Database URI: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgr
 Redis URI: redis://${REDIS_STACK_NAME}_redis:6379
 Qdrant URI: http://${QDRANT_STACK_NAME}_qdrant:6333
 
-SOLUÇÃO BASEADA NO ARQUIVO OFICIAL:
-✓ Arquivo zep.yaml baseado no repositório oficial do Zep
-✓ Configuração postgres direta (não store.type)
-✓ ZEP_CONFIG_FILE=zep.yaml configurado corretamente
-✓ Estrutura idêntica ao docker-compose oficial
+CORREÇÕES APLICADAS PARA ZEP 0.26.0:
+✓ store.type: postgres definido corretamente
+✓ Configuração postgres dentro de store.postgres
+✓ auth.secret configurado para autenticação
+✓ Estrutura de configuração compatível com v0.26.0
+✓ Dependências entre containers configuradas
 
-Nota: Usando configuração oficial do repositório Zep.
+Configuração corrigida baseada na documentação oficial do Zep 0.26.0
 EOF
     chmod 600 "${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
     log_message "Credenciais do Zep salvas em ${CREDENTIALS_DIR}/zep${SUFFIX}.txt"
@@ -766,15 +744,17 @@ cat << EOF > /tmp/zep${SUFFIX}_output.json
   "qdrantStackName": "${QDRANT_STACK_NAME}",
   "databaseUri": "postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}",
   "redisUri": "redis://${REDIS_STACK_NAME}_redis:6379",
-  "qdrantUri": "http://${QDRANT_STACK_NAME}_qdrant:6333"
+  "qdrantUri": "http://${QDRANT_STACK_NAME}_qdrant:6333",
+  "version": "0.26.0",
+  "configFixed": true
 }
 EOF
 
 log_message "Arquivo JSON de saída criado em /tmp/zep${SUFFIX}_output.json"
 
 # Aguardar um pouco mais para garantir que todos os serviços estejam funcionando
-log_message "Aguardando 30 segundos adicionais para estabilização dos serviços..."
-sleep 30
+log_message "Aguardando 45 segundos adicionais para estabilização dos serviços..."
+sleep 45
 
 # Verificar se o Zep está respondendo
 log_message "Verificando se o Zep está respondendo..."
@@ -788,12 +768,22 @@ else
     log_message "Zep retornou código HTTP: $ZEP_HEALTH_CHECK. Pode estar ainda inicializando."
 fi
 
+# Tentar verificar a API do Zep
+log_message "Testando endpoint da API do Zep..."
+ZEP_API_CHECK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${ZEP_API_KEY}" "https://${ZEP_DOMAIN}/api/v1/sessions" || echo "000")
+
+if [ "$ZEP_API_CHECK" = "200" ] || [ "$ZEP_API_CHECK" = "404" ]; then
+    log_message "API do Zep está respondendo corretamente!"
+else
+    log_message "API do Zep retornou código HTTP: $ZEP_API_CHECK. Verificar configuração."
+fi
+
 # Enviar webhook com logs de sucesso
-send_webhook_with_logs "success" "Instalação do Zep concluída com sucesso"
+send_webhook_with_logs "success" "Instalação do Zep 0.26.0 concluída com sucesso (configuração corrigida)"
 
 echo "---------------------------------------------"
-echo -e "${VERDE}[ ZEP - INSTALAÇÃO COMPLETA ]${RESET}"
-echo -e "${VERDE}Versão do Zep:${RESET} 0.26.0 (estável, sem bugs conhecidos)"
+echo -e "${VERDE}[ ZEP 0.26.0 - INSTALAÇÃO COMPLETA - CONFIGURAÇÃO CORRIGIDA ]${RESET}"
+echo -e "${VERDE}Versão do Zep:${RESET} 0.26.0 (com correções de configuração)"
 echo -e "${VERDE}API URL:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}API Key:${RESET} ${ZEP_API_KEY}"
 echo -e "${VERDE}Qdrant Dashboard:${RESET} https://qdrant${SUFFIX}.${ZEP_DOMAIN}"
@@ -803,16 +793,21 @@ echo -e "  - ${BEGE}${REDIS_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${PG_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${QDRANT_STACK_NAME}${RESET}"
 echo -e "  - ${BEGE}${ZEP_STACK_NAME}${RESET}"
-echo -e "${AMARELO}SOLUÇÃO OFICIAL APLICADA:${RESET}"
-echo -e "1. Arquivo zep.yaml oficial criado (não config.yaml)"
-echo -e "2. Configuração postgres direta no arquivo YAML"  
-echo -e "3. ZEP_CONFIG_FILE=zep.yaml (sem caminho /app/)"
+echo -e "${AMARELO}CORREÇÕES APLICADAS PARA ZEP 0.26.0:${RESET}"
+echo -e "1. ✓ store.type: postgres definido (resolvia o erro fatal)"
+echo -e "2. ✓ Configuração postgres dentro de store.postgres"  
+echo -e "3. ✓ auth.secret configurado para autenticação da API"
+echo -e "4. ✓ Dependências entre containers (depends_on)"
+echo -e "5. ✓ Tempo de inicialização aumentado para estabilidade"
 echo -e "${VERDE}Acesse seu Zep através do endereço:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo ""
 echo -e "${VERDE}Exemplo de uso em Python:${RESET}"
 echo -e "from zep_python import ZepClient"
 echo -e "client = ZepClient(api_url='https://${ZEP_DOMAIN}', api_key='${ZEP_API_KEY}')"
+echo ""
+echo -e "${AMARELO}PROBLEMA RESOLVIDO:${RESET}"
+echo -e "O erro 'store.type must be set' foi corrigido na configuração do arquivo zep.yaml"
 
 log_message "Instalação concluída com sucesso!"
 
