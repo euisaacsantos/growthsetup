@@ -378,10 +378,33 @@ EOL
 
 # Copiar arquivo zep.yaml para o volume
 log_message "Copiando arquivo zep.yaml para volume Docker..."
-# Primeiro, criar um container temporário para copiar o arquivo
-docker run --rm -d --name temp_zep_config${SUFFIX} -v zep_config${SUFFIX}:/target alpine:latest sleep 30
-docker cp "zep${SUFFIX}.yaml" temp_zep_config${SUFFIX}:/target/zep.yaml
-docker stop temp_zep_config${SUFFIX} 2>/dev/null || true
+
+# Método mais robusto para copiar o arquivo
+log_message "Verificando se o arquivo zep${SUFFIX}.yaml foi criado..."
+if [ ! -f "zep${SUFFIX}.yaml" ]; then
+    error_exit "Arquivo zep${SUFFIX}.yaml não foi criado corretamente"
+fi
+
+log_message "Conteúdo do arquivo zep${SUFFIX}.yaml:"
+cat "zep${SUFFIX}.yaml"
+
+# Limpar o volume e copiar o arquivo
+log_message "Limpando volume zep_config${SUFFIX} e copiando arquivo..."
+docker run --rm -v zep_config${SUFFIX}:/target -v $(pwd):/source alpine:latest sh -c "
+    rm -rf /target/* 
+    cp /source/zep${SUFFIX}.yaml /target/zep.yaml
+    ls -la /target/
+    cat /target/zep.yaml
+"
+
+# Verificar se o arquivo foi copiado corretamente
+log_message "Verificando se o arquivo foi copiado corretamente para o volume..."
+docker run --rm -v zep_config${SUFFIX}:/target alpine:latest sh -c "
+    echo 'Arquivos no volume:'
+    ls -la /target/
+    echo '--- Conteúdo do zep.yaml ---'
+    cat /target/zep.yaml 2>/dev/null || echo 'ERRO: Arquivo zep.yaml não encontrado!'
+"
 
 # Criar arquivo docker-compose para a stack Zep
 log_message "Criando arquivo docker-compose para a stack Zep..."
@@ -394,11 +417,22 @@ services:
   zep:
     image: ghcr.io/getzep/zep:0.26.0
     environment:
-      # ARQUIVO DE CONFIGURAÇÃO
+      # ARQUIVO DE CONFIGURAÇÃO - CAMINHO ABSOLUTO
       - ZEP_CONFIG_FILE=/app/config/zep.yaml
       
       # CHAVE OPENAI TEMPORÁRIA (CONFIGURAR DEPOIS VIA API)
       - ZEP_OPENAI_API_KEY=${TEMP_OPENAI_KEY}
+      
+      # CONFIGURAÇÕES DIRETAS (FALLBACK)
+      - ZEP_STORE_TYPE=postgres
+      - ZEP_STORE_POSTGRES_HOST=${PG_STACK_NAME}_postgres
+      - ZEP_STORE_POSTGRES_PORT=5432
+      - ZEP_STORE_POSTGRES_USER=postgres
+      - ZEP_STORE_POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - ZEP_STORE_POSTGRES_DATABASE=zep${SUFFIX}
+      - ZEP_STORE_POSTGRES_SSLMODE=disable
+      - ZEP_AUTH_SECRET=${ZEP_API_KEY}
+      - ZEP_LOG_LEVEL=info
       
       # Timezone
       - TZ=America/Sao_Paulo
@@ -833,8 +867,10 @@ echo -e "1. ✓ store.type: postgres definido (resolvia o erro fatal)"
 echo -e "2. ✓ Configuração postgres dentro de store.postgres"  
 echo -e "3. ✓ auth.secret configurado para autenticação da API"
 echo -e "4. ✓ ZEP_OPENAI_API_KEY temporária definida"
-echo -e "5. ✓ Dependências entre containers (depends_on)"
-echo -e "6. ✓ Tempo de inicialização aumentado para estabilidade"
+echo -e "5. ✓ Variáveis de ambiente como fallback (ZEP_STORE_TYPE, etc.)"
+echo -e "6. ✓ Dependências entre containers (depends_on)"
+echo -e "7. ✓ Tempo de inicialização aumentado para estabilidade"
+echo -e "8. ✓ Verificação de cópia do arquivo de configuração"
 echo -e "${VERDE}Acesse seu Zep através do endereço:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
 echo ""
