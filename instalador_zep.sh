@@ -158,9 +158,14 @@ log_message "API Key do Qdrant gerada: ${QDRANT_API_KEY}"
 # Criar volumes Docker necessários
 log_message "Criando volumes Docker..."
 docker volume create zep_data${SUFFIX} 2>/dev/null || log_message "Volume zep_data${SUFFIX} já existe."
+docker volume create zep_config${SUFFIX} 2>/dev/null || log_message "Volume zep_config${SUFFIX} já existe."
 docker volume create zep_postgres_data${SUFFIX} 2>/dev/null || log_message "Volume zep_postgres_data${SUFFIX} já existe."
 docker volume create zep_redis_data${SUFFIX} 2>/dev/null || log_message "Volume zep_redis_data${SUFFIX} já existe."
 docker volume create zep_qdrant_data${SUFFIX} 2>/dev/null || log_message "Volume zep_qdrant_data${SUFFIX} já existe."
+
+# Copiar arquivo config.yaml para o volume
+log_message "Copiando arquivo config.yaml para volume Docker..."
+docker run --rm -v zep_config${SUFFIX}:/config -v $(pwd):/source alpine:latest cp /source/config${SUFFIX}.yaml /config
 
 # Verificar se a rede GrowthNet existe, caso contrário, criar
 if ! docker network inspect GrowthNet >/dev/null 2>&1; then
@@ -316,6 +321,34 @@ networks:
     name: GrowthNet
 EOL
 
+# Criar arquivo config.yaml para o Zep
+log_message "Criando arquivo config.yaml para o Zep..."
+cat > "config${SUFFIX}.yaml" <<EOL
+store:
+  type: postgres
+  postgres:
+    dsn: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  web_enabled: false
+
+llm:
+  service: openai
+  config:
+    api_key: sk-temp-key-configure-later-via-api
+    model: gpt-3.5-turbo
+
+extractors:
+  embeddings:
+    service: openai
+    dimensions: 1536
+    model: AdaEmbeddingV2
+
+log:
+  level: info
+EOL
 # Criar arquivo docker-compose para a stack Zep
 log_message "Criando arquivo docker-compose para a stack Zep..."
 cat > "${ZEP_STACK_NAME}.yaml" <<EOL
@@ -327,40 +360,19 @@ services:
   zep:
     image: ghcr.io/getzep/zep:0.27.2
     environment:
-      # Configurações do Zep
-      - ZEP_AUTH_REQUIRED=true
-      - ZEP_AUTH_SECRET=${ZEP_API_KEY}
-      - ZEP_LOG_LEVEL=info
-      - ZEP_DEVELOPMENT=false
+      # Configurações via config.yaml
+      - ZEP_CONFIG_FILE=/app/config.yaml
       
-      # Configurações do store - Formato correto para v0.27.2
-      - STORE_TYPE=postgres
-      - STORE_POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
-      
-      # Configurações do Redis
-      - ZEP_REDIS_URL=redis://${REDIS_STACK_NAME}_redis:6379
-      
-      # Configurações do Qdrant
-      - ZEP_VECTOR_STORE_TYPE=qdrant
-      - ZEP_VECTOR_STORE_URL=http://${QDRANT_STACK_NAME}_qdrant:6333
-      - ZEP_VECTOR_STORE_API_KEY=${QDRANT_API_KEY}
-      
-      # Configurações de embeddings (configurável via API depois)
+      # Variáveis de ambiente necessárias
       - ZEP_OPENAI_API_KEY=sk-temp-key-configure-later-via-api
-      - ZEP_EMBEDDING_PROVIDER=openai
-      - ZEP_EMBEDDING_DIMENSIONS=1536
-      
-      # Configurações de rede
-      - ZEP_PORT=8000
-      - ZEP_HOST=0.0.0.0
-      
-      # Configurações de segurança - Web UI desabilitada para produção
-      - ZEP_SERVER_WEB_ENABLED=false
+      - ZEP_AUTH_SECRET=${ZEP_API_KEY}
+      - ZEP_AUTH_REQUIRED=true
       
       # Timezone
       - TZ=America/Sao_Paulo
     volumes:
       - zep_data${SUFFIX}:/app/data
+      - zep_config${SUFFIX}:/app/config.yaml:ro
     networks:
       - GrowthNet
     deploy:
@@ -395,6 +407,8 @@ services:
 
 volumes:
   zep_data${SUFFIX}:
+    external: true
+  zep_config${SUFFIX}:
     external: true
 
 networks:
@@ -768,5 +782,6 @@ rm -f "${REDIS_STACK_NAME}.yaml"
 rm -f "${PG_STACK_NAME}.yaml"
 rm -f "${QDRANT_STACK_NAME}.yaml"
 rm -f "${ZEP_STACK_NAME}.yaml"
+rm -f "config${SUFFIX}.yaml"
 
 log_message "Arquivos temporários removidos."
