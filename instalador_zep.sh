@@ -317,6 +317,9 @@ networks:
     name: GrowthNet
 EOL
 
+# Gerar chave temporária OpenAI (será alterada depois)
+TEMP_OPENAI_KEY="sk-temp-$(openssl rand -hex 24)"
+
 # Criar arquivo zep.yaml corrigido para a versão 0.26.0
 log_message "Criando arquivo zep.yaml corrigido para versão 0.26.0..."
 cat > "zep${SUFFIX}.yaml" <<EOL
@@ -348,9 +351,19 @@ store:
 auth:
   secret: ${ZEP_API_KEY}
 
-# Configuração de embedding (opcional, pode ser configurada via API)
-nlp:
-  server_url: ""
+# Configuração de embedding (TEMPORÁRIA - configurar depois)
+llm:
+  service: openai
+  config:
+    api_key: ${TEMP_OPENAI_KEY}
+    model: gpt-3.5-turbo
+
+extractors:
+  embeddings:
+    service: openai
+    config:
+      api_key: ${TEMP_OPENAI_KEY}
+      model: text-embedding-ada-002
 
 # Configuração de cache Redis (opcional)
 memory:
@@ -383,6 +396,9 @@ services:
     environment:
       # ARQUIVO DE CONFIGURAÇÃO
       - ZEP_CONFIG_FILE=/app/config/zep.yaml
+      
+      # CHAVE OPENAI TEMPORÁRIA (CONFIGURAR DEPOIS VIA API)
+      - ZEP_OPENAI_API_KEY=${TEMP_OPENAI_KEY}
       
       # Timezone
       - TZ=America/Sao_Paulo
@@ -715,12 +731,31 @@ Database URI: postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgr
 Redis URI: redis://${REDIS_STACK_NAME}_redis:6379
 Qdrant URI: http://${QDRANT_STACK_NAME}_qdrant:6333
 
+CHAVE OPENAI TEMPORÁRIA (SUBSTITUA PELA SUA):
+Chave Temporária: ${TEMP_OPENAI_KEY}
+
 CORREÇÕES APLICADAS PARA ZEP 0.26.0:
 ✓ store.type: postgres definido corretamente
 ✓ Configuração postgres dentro de store.postgres
 ✓ auth.secret configurado para autenticação
+✓ ZEP_OPENAI_API_KEY definido temporariamente
 ✓ Estrutura de configuração compatível com v0.26.0
 ✓ Dependências entre containers configuradas
+
+COMO ALTERAR A CHAVE OPENAI DEPOIS:
+1. Via API REST:
+   curl -X POST "https://${ZEP_DOMAIN}/api/v1/config" \
+   -H "Authorization: Bearer ${ZEP_API_KEY}" \
+   -H "Content-Type: application/json" \
+   -d '{"llm":{"service":"openai","config":{"api_key":"SUA_CHAVE_REAL","model":"gpt-3.5-turbo"}}}'
+
+2. Via Portainer (editar stack Zep):
+   - Alterar variável ZEP_OPENAI_API_KEY no docker-compose
+   - Ou editar arquivo zep.yaml no volume
+
+3. Via arquivo de configuração:
+   - Editar /app/config/zep.yaml no container
+   - Reiniciar o serviço Zep
 
 Configuração corrigida baseada na documentação oficial do Zep 0.26.0
 EOF
@@ -797,17 +832,29 @@ echo -e "${AMARELO}CORREÇÕES APLICADAS PARA ZEP 0.26.0:${RESET}"
 echo -e "1. ✓ store.type: postgres definido (resolvia o erro fatal)"
 echo -e "2. ✓ Configuração postgres dentro de store.postgres"  
 echo -e "3. ✓ auth.secret configurado para autenticação da API"
-echo -e "4. ✓ Dependências entre containers (depends_on)"
-echo -e "5. ✓ Tempo de inicialização aumentado para estabilidade"
+echo -e "4. ✓ ZEP_OPENAI_API_KEY temporária definida"
+echo -e "5. ✓ Dependências entre containers (depends_on)"
+echo -e "6. ✓ Tempo de inicialização aumentado para estabilidade"
 echo -e "${VERDE}Acesse seu Zep através do endereço:${RESET} https://${ZEP_DOMAIN}"
 echo -e "${VERDE}As stacks estão disponíveis e editáveis no Portainer.${RESET}"
+echo ""
+echo -e "${AMARELO}⚠️  IMPORTANTE - CONFIGURAR CHAVE OPENAI REAL:${RESET}"
+echo -e "Chave temporária: ${TEMP_OPENAI_KEY}"
+echo -e "${VERDE}Para alterar a chave OpenAI:${RESET}"
+echo -e "1. Via API: curl -X POST \"https://${ZEP_DOMAIN}/api/v1/config\" \\"
+echo -e "   -H \"Authorization: Bearer ${ZEP_API_KEY}\" \\"
+echo -e "   -H \"Content-Type: application/json\" \\"
+echo -e "   -d '{\"llm\":{\"service\":\"openai\",\"config\":{\"api_key\":\"SUA_CHAVE_REAL\",\"model\":\"gpt-3.5-turbo\"}}}'"
+echo -e "2. Via Portainer: Editar stack ${ZEP_STACK_NAME} → variável ZEP_OPENAI_API_KEY"
+echo -e "3. Via volume: Editar arquivo /app/config/zep.yaml no container"
 echo ""
 echo -e "${VERDE}Exemplo de uso em Python:${RESET}"
 echo -e "from zep_python import ZepClient"
 echo -e "client = ZepClient(api_url='https://${ZEP_DOMAIN}', api_key='${ZEP_API_KEY}')"
 echo ""
-echo -e "${AMARELO}PROBLEMA RESOLVIDO:${RESET}"
-echo -e "O erro 'store.type must be set' foi corrigido na configuração do arquivo zep.yaml"
+echo -e "${AMARELO}PROBLEMAS RESOLVIDOS:${RESET}"
+echo -e "✓ Erro 'store.type must be set' foi corrigido"
+echo -e "✓ Erro 'ZEP_OPENAI_API_KEY is not set' foi corrigido (temporariamente)"
 
 log_message "Instalação concluída com sucesso!"
 
