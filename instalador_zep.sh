@@ -325,7 +325,7 @@ services:
 ## --------------------------- Zep Server --------------------------- ##
 
   zep:
-    image: ghcr.io/getzep/zep:latest
+    image: ghcr.io/getzep/zep:0.27.2
     environment:
       # Configurações do Zep
       - ZEP_AUTH_REQUIRED=true
@@ -333,11 +333,9 @@ services:
       - ZEP_LOG_LEVEL=info
       - ZEP_DEVELOPMENT=false
       
-      # Configurações do store - CORRIGIDO
+      # Configurações do store - Formato correto para v0.27.2
       - STORE_TYPE=postgres
-      
-      # Configurações do banco de dados PostgreSQL
-      - ZEP_DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
+      - STORE_POSTGRES_DSN=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
       
       # Configurações do Redis
       - ZEP_REDIS_URL=redis://${REDIS_STACK_NAME}_redis:6379
