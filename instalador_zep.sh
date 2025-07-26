@@ -333,8 +333,8 @@ services:
       - ZEP_LOG_LEVEL=info
       - ZEP_DEVELOPMENT=false
       
-      # Configurações do store
-      - ZEP_STORE_TYPE=postgres
+      # Configurações do store - CORRIGIDO
+      - STORE_TYPE=postgres
       
       # Configurações do banco de dados PostgreSQL
       - ZEP_DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@${PG_STACK_NAME}_postgres:5432/zep${SUFFIX}?sslmode=disable
