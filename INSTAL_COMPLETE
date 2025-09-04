@@ -377,7 +377,33 @@ docker stack deploy -c docker-compose.yml portainer
 
 # Aguardar Portainer inicializar
 log "Aguardando Portainer inicializar..."
-sleep 20
+sleep 30
+
+# Configurar senha via API
+log "Configurando senha administrativa do Portainer..."
+for i in 1 2 3 4 5; do
+    # Tentar configurar via API
+    SETUP_RESPONSE=$(curl -s -X POST "https://${PORTAINER_DOMAIN}/api/users/admin/init" \
+        -H "Content-Type: application/json" \
+        -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_PASSWORD}\"}" \
+        -w "%{http_code}" -o /tmp/portainer_setup.log)
+    
+    HTTP_CODE=$(echo "$SETUP_RESPONSE" | tail -c 4)
+    
+    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "409" ]; then
+        log "Senha do Portainer configurada com sucesso"
+        break
+    else
+        log "Tentativa $i/5 de configuração da senha... (HTTP: $HTTP_CODE)"
+        sleep 10
+    fi
+    
+    if [ $i -eq 5 ]; then
+        warning "Não foi possível configurar senha via API. Use a interface web."
+    fi
+done
+
+rm -f /tmp/portainer_setup.log
 
 # 7. GERAR CREDENCIAIS PARA N8N E EVOLUTION
 log "=== ETAPA 7: GERANDO CREDENCIAIS ==="
