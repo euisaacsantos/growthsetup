@@ -2,8 +2,8 @@
 
 # Instalador Automatizado Completo de Servidor
 # Instala: Ubuntu/Debian updates, Docker Swarm, Portainer (com senha), N8N, Evolution API
-# Uso: ./install_complete_server.sh DOMAIN PORTAINER_SUBDOMAIN N8N_SUBDOMAIN EVOLUTION_SUBDOMAIN WEBHOOK_URL [PORTAINER_PASSWORD]
-# Exemplo: ./install_complete_server.sh exemplo.com painel n8n api https://webhook.site/uuid minhasenha123
+# Uso: ./install_complete_server.sh DOMAIN PORTAINER_SUBDOMAIN N8N_EDITOR_SUBDOMAIN N8N_WEBHOOK_SUBDOMAIN EVOLUTION_SUBDOMAIN WEBHOOK_URL [PORTAINER_PASSWORD]
+# Exemplo: ./install_complete_server.sh exemplo.com painel editor webhook api https://webhook.site/uuid minhasenha123
 
 set -e  # Para no primeiro erro
 
