@@ -204,16 +204,73 @@ if docker swarm init --advertise-addr $SERVER_IP; then log "Docker Swarm inicial
 log "Docker Swarm configurado e operacional"
 
 # ==============================================================================
-# ETAPA 5: CRIANDO REDES
+# ETAPA 5: CRIANDO REDES E GERANDO CREDENCIAIS
 # ==============================================================================
-log "=== ETAPA 5: CRIANDO REDES ==="
+log "=== ETAPA 5: CRIANDO REDES E GERANDO CREDENCIAIS ==="
 docker network create --driver overlay --attachable proxy 2>/dev/null || log "Rede proxy já existe"
 docker network create --driver overlay --attachable GrowthNet 2>/dev/null || log "Rede GrowthNet já existe"
 
+TRAEFIK_USER="admin"
+TRAEFIK_PASSWORD=$(openssl rand -hex 16)
+TRAEFIK_HASHED_PASSWORD=$(htpasswd -nbB ${TRAEFIK_USER} ${TRAEFIK_PASSWORD})
+ESCAPED_TRAEFIK_HASH=$(echo "${TRAEFIK_HASHED_PASSWORD}" | sed 's/\$/\$\$/g')
+N8N_ENCRYPTION_KEY=$(openssl rand -hex 16)
+N8N_SUGGESTED_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
+EVOLUTION_API_KEY=$(openssl rand -hex 16)
+N8N_POSTGRES_PASSWORD=$(openssl rand -hex 16)
+EVOLUTION_POSTGRES_PASSWORD=$(openssl rand -hex 16)
+log "Todas as credenciais foram geradas."
+
 # ==============================================================================
-# ETAPA 6: INSTALAR APENAS O PORTAINER
+# ETAPA 6: INSTALANDO INFRAESTRUTURA (TRAEFIK & PORTAINER)
 # ==============================================================================
-log "=== ETAPA 6: INSTALANDO PORTAINER ==="
+log "=== ETAPA 6: INSTALANDO TRAEFIK ==="
+docker volume create traefik_data 2>/dev/null || true
+mkdir -p /opt/traefik
+cat > /opt/traefik/docker-compose.yml << EOF
+version: '3.7'
+services:
+  traefik:
+    image: traefik:v2.10
+    command:
+      - --api.dashboard=true
+      - --providers.docker=true
+      - --providers.docker.swarmMode=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=proxy
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencryptresolver.acme.httpchallenge=true
+      - --certificatesresolvers.letsencryptresolver.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencryptresolver.acme.email=admin@${DOMAIN}
+      - --certificatesresolvers.letsencryptresolver.acme.storage=/letsencrypt/acme.json
+    ports: ["80:80", "443:443"]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro", "traefik_data:/letsencrypt"]
+    networks: ["proxy"]
+    deploy:
+      mode: global
+      placement: { constraints: ["node.role == manager"] }
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.traefik-dashboard.rule=Host(\`${TRAEFIK_DOMAIN}\`)"
+        - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+        - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencryptresolver"
+        - "traefik.http.routers.traefik-dashboard.service=api@internal"
+        - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth"
+        - "traefik.http.middlewares.traefik-auth.basicauth.users=${ESCAPED_TRAEFIK_HASH}"
+        - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+        - "traefik.http.routers.redirect-https.rule=hostregexp(\`{host:.+}\`)"
+        - "traefik.http.routers.redirect-https.entrypoints=web"
+        - "traefik.http.routers.redirect-https.middlewares=redirect-to-https"
+volumes:
+  traefik_data: { external: true }
+networks:
+  proxy: { external: true, name: proxy }
+EOF
+log "Fazendo deploy do Traefik via Docker..."
+docker stack deploy -c /opt/traefik/docker-compose.yml traefik
+
+log "=== ETAPA 7: INSTALANDO PORTAINER ==="
 docker volume create portainer_data 2>/dev/null || true
 mkdir -p /opt/portainer
 cat > /opt/portainer/docker-compose.yml << EOF
@@ -222,17 +279,12 @@ services:
   portainer:
     image: portainer/portainer-ce:latest
     command: --host=unix:///var/run/docker.sock --logo="https://www.growthtap.com.br/logo.png"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - portainer_data:/data
-      - /opt:/opt
-    networks:
-      - proxy
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock", "portainer_data:/data", "/opt:/opt"]
+    networks: ["proxy"]
     deploy:
       mode: replicated
       replicas: 1
-      placement:
-        constraints: [node.role == manager]
+      placement: { constraints: [node.role == manager] }
       labels:
         - "traefik.enable=true"
         - "traefik.docker.network=proxy"
@@ -241,28 +293,24 @@ services:
         - "traefik.http.routers.portainer.tls.certresolver=letsencryptresolver"
         - "traefik.http.services.portainer.loadbalancer.server.port=9000"
 volumes:
-  portainer_data:
-    external: true
+  portainer_data: { external: true }
 networks:
-  proxy:
-    external: true
-    name: proxy
+  proxy: { external: true, name: proxy }
 EOF
 log "Fazendo deploy do Portainer via Docker..."
-cd /opt/portainer
-docker stack deploy -c docker-compose.yml portainer
-log "Aguardando Portainer inicializar..."
-sleep 45
+docker stack deploy -c /opt/portainer/docker-compose.yml portainer
+log "Aguardando infraestrutura (Traefik e Portainer) inicializar e obter SSL..."
+sleep 60
 
 # ==============================================================================
-# ETAPA 7: CONFIGURAR SENHA E OBTER TOKEN DA API PORTAINER
+# ETAPA 8: CONFIGURAR SENHA E OBTER TOKEN DA API PORTAINER
 # ==============================================================================
-log "=== ETAPA 7: CONFIGURANDO PORTAINER E API ==="
+log "=== ETAPA 8: CONFIGURANDO PORTAINER E API ==="
 log "Configurando senha administrativa do Portainer..."
 for i in {1..10}; do
     SETUP_RESPONSE=$(curl -s -k -X POST "https://${PORTAINER_DOMAIN}/api/users/admin/init" -H "Content-Type: application/json" -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_PASSWORD}\"}" -w "%{http_code}" -o /dev/null)
     if [ "$SETUP_RESPONSE" = "200" ] || [ "$SETUP_RESPONSE" = "409" ]; then log "Senha do Portainer configurada com sucesso"; break; else log "Tentativa $i/10 de configuração da senha... (HTTP: $SETUP_RESPONSE)"; sleep 10; fi
-    if [ $i -eq 10 ]; then warning "Não foi possível configurar senha via API."; fi
+    if [ $i -eq 10 ]; then error_exit "Não foi possível configurar senha do Portainer via API."; fi
 done
 
 log "Obtendo token de autenticação (JWT) do Portainer..."
@@ -281,7 +329,7 @@ for i in {1..5}; do
 done
 
 # ==============================================================================
-# NOVA FUNÇÃO: DEPLOY DE STACKS VIA API DO PORTAINER
+# FUNÇÃO: DEPLOY DE STACKS VIA API DO PORTAINER
 # ==============================================================================
 deploy_stack_via_portainer() {
     local stack_name="$1"
@@ -312,79 +360,8 @@ EOF
 }
 # ==============================================================================
 
-# ETAPA 8: GERAR CREDENCIAIS
-log "=== ETAPA 8: GERANDO CREDENCIAIS ==="
-TRAEFIK_USER="admin"
-TRAEFIK_PASSWORD=$(openssl rand -hex 16)
-TRAEFIK_HASHED_PASSWORD=$(htpasswd -nbB ${TRAEFIK_USER} ${TRAEFIK_PASSWORD})
-ESCAPED_TRAEFIK_HASH=$(echo "${TRAEFIK_HASHED_PASSWORD}" | sed 's/\$/\$\$/g')
-N8N_ENCRYPTION_KEY=$(openssl rand -hex 16)
-N8N_SUGGESTED_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
-EVOLUTION_API_KEY=$(openssl rand -hex 16)
-N8N_POSTGRES_PASSWORD=$(openssl rand -hex 16)
-EVOLUTION_POSTGRES_PASSWORD=$(openssl rand -hex 16)
-log "Todas as credenciais foram geradas."
-
-# ETAPA 9: PREPARAR E DEPLOYAR TRAEFIK
-log "=== ETAPA 9: DEPLOYANDO TRAEFIK VIA API ==="
-docker volume create traefik_data 2>/dev/null || true
-mkdir -p /opt/traefik
-cat > /opt/traefik/docker-compose.yml << EOF
-version: '3.7'
-services:
-  traefik:
-    image: traefik:v2.10
-    command:
-      - --api.dashboard=true
-      - --providers.docker=true
-      - --providers.docker.swarmMode=true
-      - --providers.docker.exposedbydefault=false
-      - --providers.docker.network=proxy
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.letsencryptresolver.acme.httpchallenge=true
-      - --certificatesresolvers.letsencryptresolver.acme.httpchallenge.entrypoint=web
-      - --certificatesresolvers.letsencryptresolver.acme.email=admin@${DOMAIN}
-      - --certificatesresolvers.letsencryptresolver.acme.storage=/letsencrypt/acme.json
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
-      - "traefik_data:/letsencrypt"
-    networks:
-      - "proxy"
-    deploy:
-      mode: global
-      placement:
-        constraints:
-          - "node.role == manager"
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.traefik-dashboard.rule=Host(\`${TRAEFIK_DOMAIN}\`)"
-        - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
-        - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencryptresolver"
-        - "traefik.http.routers.traefik-dashboard.service=api@internal"
-        - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth"
-        - "traefik.http.middlewares.traefik-auth.basicauth.users=${ESCAPED_TRAEFIK_HASH}"
-        - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
-        - "traefik.http.routers.redirect-https.rule=hostregexp(\`{host:.+}\`)"
-        - "traefik.http.routers.redirect-https.entrypoints=web"
-        - "traefik.http.routers.redirect-https.middlewares=redirect-to-https"
-volumes:
-  traefik_data:
-    external: true
-networks:
-  proxy:
-    external: true
-    name: proxy
-EOF
-deploy_stack_via_portainer "traefik" "/opt/traefik/docker-compose.yml"
-log "Aguardando Traefik (necessário para o Portainer obter SSL)..."
-sleep 20 # Traefik precisa estar de pé para o Portainer funcionar com SSL
-
-# ETAPA 10: PREPARAR E DEPLOYAR N8N
-log "=== ETAPA 10: DEPLOYANDO N8N VIA API ==="
+# ETAPA 9: PREPARAR E DEPLOYAR N8N
+log "=== ETAPA 9: DEPLOYANDO N8N VIA API ==="
 docker volume create n8n_data 2>/dev/null || true
 docker volume create n8n_postgres_data 2>/dev/null || true
 docker volume create n8n_redis_data 2>/dev/null || true
@@ -392,53 +369,16 @@ mkdir -p /opt/n8n
 cat > /opt/n8n/n8n_redis.yaml << EOF
 version: '3.7'
 services:
-  redis:
-    image: redis:latest
-    command: redis-server --appendonly yes
-    volumes:
-      - n8n_redis_data:/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-volumes:
-  n8n_redis_data:
-    external: true
-networks:
-  GrowthNet:
-    external: true
-    name: GrowthNet
+  redis: { image: redis:latest, command: redis-server --appendonly yes, volumes: [n8n_redis_data:/data], networks: [GrowthNet], deploy: { mode: replicated, replicas: 1, placement: { constraints: [node.role == manager] } } }
+volumes: { n8n_redis_data: { external: true } }
+networks: { GrowthNet: { external: true, name: GrowthNet } }
 EOF
 cat > /opt/n8n/n8n_postgres.yaml << EOF
 version: '3.7'
 services:
-  postgres:
-    image: postgres:13
-    environment:
-      - "POSTGRES_PASSWORD=${N8N_POSTGRES_PASSWORD}"
-      - "POSTGRES_USER=postgres"
-      - "POSTGRES_DB=n8n_queue"
-    volumes:
-      - n8n_postgres_data:/var/lib/postgresql/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-volumes:
-  n8n_postgres_data:
-    external: true
-networks:
-  GrowthNet:
-    external: true
-    name: GrowthNet
+  postgres: { image: postgres:13, environment: ["POSTGRES_PASSWORD=${N8N_POSTGRES_PASSWORD}", "POSTGRES_USER=postgres", "POSTGRES_DB=n8n_queue"], volumes: [n8n_postgres_data:/var/lib/postgresql/data], networks: [GrowthNet], deploy: { mode: replicated, replicas: 1, placement: { constraints: [node.role == manager] } } }
+volumes: { n8n_postgres_data: { external: true } }
+networks: { GrowthNet: { external: true, name: GrowthNet } }
 EOF
 cat > /opt/n8n/n8n.yaml << EOF
 version: "3.7"
@@ -446,113 +386,32 @@ services:
   n8n_editor:
     image: n8nio/n8n:latest
     command: start
-    networks:
-      - GrowthNet
-      - proxy
-    environment:
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_DATABASE: n8n_queue
-      DB_POSTGRESDB_HOST: n8n_postgres_postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_USER: postgres
-      DB_POSTGRESDB_PASSWORD: "${N8N_POSTGRES_PASSWORD}"
-      N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}"
-      N8N_HOST: "${N8N_EDITOR_DOMAIN}"
-      N8N_EDITOR_BASE_URL: "https://${N8N_EDITOR_DOMAIN}/"
-      WEBHOOK_URL: "https://${N8N_WEBHOOK_DOMAIN}/"
-      N8N_PROTOCOL: https
-      N8N_PORT: 5678
-      NODE_ENV: production
-      EXECUTIONS_MODE: queue
-      QUEUE_BULL_REDIS_HOST: n8n_redis_redis
-      QUEUE_BULL_REDIS_PORT: 6379
-      GENERIC_TIMEZONE: America/Sao_Paulo
-    volumes:
-      - n8n_data:/home/node/.n8n
+    networks: [GrowthNet, proxy]
+    environment: {DB_TYPE: postgresdb, DB_POSTGRESDB_DATABASE: n8n_queue, DB_POSTGRESDB_HOST: n8n_postgres_postgres, DB_POSTGRESDB_PORT: 5432, DB_POSTGRESDB_USER: postgres, DB_POSTGRESDB_PASSWORD: "${N8N_POSTGRES_PASSWORD}", N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}", N8N_HOST: "${N8N_EDITOR_DOMAIN}", N8N_EDITOR_BASE_URL: "https://${N8N_EDITOR_DOMAIN}/", WEBHOOK_URL: "https://${N8N_WEBHOOK_DOMAIN}/", N8N_PROTOCOL: https, N8N_PORT: 5678, NODE_ENV: production, EXECUTIONS_MODE: queue, QUEUE_BULL_REDIS_HOST: n8n_redis_redis, QUEUE_BULL_REDIS_PORT: 6379, GENERIC_TIMEZONE: America/Sao_Paulo}
+    volumes: [n8n_data:/home/node/.n8n]
     deploy:
       replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.docker.network=proxy"
-        - "traefik.http.routers.n8n.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)"
-        - "traefik.http.routers.n8n.entrypoints=websecure"
-        - "traefik.http.routers.n8n.tls.certresolver=letsencryptresolver"
-        - "traefik.http.services.n8n.loadbalancer.server.port=5678"
+      placement: { constraints: [node.role == manager] }
+      labels: ["traefik.enable=true", "traefik.docker.network=proxy", "traefik.http.routers.n8n.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)", "traefik.http.routers.n8n.entrypoints=websecure", "traefik.http.routers.n8n.tls.certresolver=letsencryptresolver", "traefik.http.services.n8n.loadbalancer.server.port=5678"]
   n8n_webhook:
     image: n8nio/n8n:latest
     command: webhook
-    networks:
-      - GrowthNet
-      - proxy
-    environment:
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_DATABASE: n8n_queue
-      DB_POSTGRESDB_HOST: n8n_postgres_postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_USER: postgres
-      DB_POSTGRESDB_PASSWORD: "${N8N_POSTGRES_PASSWORD}"
-      N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}"
-      N8N_HOST: "${N8N_EDITOR_DOMAIN}"
-      N8N_EDITOR_BASE_URL: "https://${N8N_EDITOR_DOMAIN}/"
-      WEBHOOK_URL: "https://${N8N_WEBHOOK_DOMAIN}/"
-      N8N_PROTOCOL: https
-      N8N_PORT: 5678
-      NODE_ENV: production
-      EXECUTIONS_MODE: queue
-      QUEUE_BULL_REDIS_HOST: n8n_redis_redis
-      QUEUE_BULL_REDIS_PORT: 6379
-      GENERIC_TIMEZONE: America/Sao_Paulo
-    volumes:
-      - n8n_data:/home/node/.n8n
+    networks: [GrowthNet, proxy]
+    environment: {DB_TYPE: postgresdb, DB_POSTGRESDB_DATABASE: n8n_queue, DB_POSTGRESDB_HOST: n8n_postgres_postgres, DB_POSTGRESDB_PORT: 5432, DB_POSTGRESDB_USER: postgres, DB_POSTGRESDB_PASSWORD: "${N8N_POSTGRES_PASSWORD}", N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}", N8N_HOST: "${N8N_EDITOR_DOMAIN}", N8N_EDITOR_BASE_URL: "https://${N8N_EDITOR_DOMAIN}/", WEBHOOK_URL: "https://${N8N_WEBHOOK_DOMAIN}/", N8N_PROTOCOL: https, N8N_PORT: 5678, NODE_ENV: production, EXECUTIONS_MODE: queue, QUEUE_BULL_REDIS_HOST: n8n_redis_redis, QUEUE_BULL_REDIS_PORT: 6379, GENERIC_TIMEZONE: America/Sao_Paulo}
+    volumes: [n8n_data:/home/node/.n8n]
     deploy:
       replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.docker.network=proxy"
-        - "traefik.http.routers.n8n_webhook.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)"
-        - "traefik.http.routers.n8n_webhook.entrypoints=websecure"
-        - "traefik.http.routers.n8n_webhook.tls.certresolver=letsencryptresolver"
-        - "traefik.http.services.n8n_webhook.loadbalancer.server.port=5678"
+      placement: { constraints: [node.role == manager] }
+      labels: ["traefik.enable=true", "traefik.docker.network=proxy", "traefik.http.routers.n8n_webhook.rule=Host(\`${N8N_WEBHOOK_DOMAIN}\`)", "traefik.http.routers.n8n_webhook.entrypoints=websecure", "traefik.http.routers.n8n_webhook.tls.certresolver=letsencryptresolver", "traefik.http.services.n8n_webhook.loadbalancer.server.port=5678"]
   n8n_worker:
     image: n8nio/n8n:latest
     command: worker --concurrency=10
-    networks:
-      - GrowthNet
-    environment:
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_DATABASE: n8n_queue
-      DB_POSTGRESDB_HOST: n8n_postgres_postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_USER: postgres
-      DB_POSTGRESDB_PASSWORD: "${N8N_POSTGRES_PASSWORD}"
-      N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}"
-      EXECUTIONS_MODE: queue
-      QUEUE_BULL_REDIS_HOST: n8n_redis_redis
-      QUEUE_BULL_REDIS_PORT: 6379
-      GENERIC_TIMEZONE: America/Sao_Paulo
-    volumes:
-      - n8n_data:/home/node/.n8n
-    deploy:
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-volumes:
-  n8n_data:
-    external: true
-networks:
-  GrowthNet:
-    external: true
-    name: GrowthNet
-  proxy:
-    external: true
-    name: proxy
+    networks: [GrowthNet]
+    environment: {DB_TYPE: postgresdb, DB_POSTGRESDB_DATABASE: n8n_queue, DB_POSTGRESDB_HOST: n8n_postgres_postgres, DB_POSTGRESDB_PORT: 5432, DB_POSTGRESDB_USER: postgres, DB_POSTGRESDB_PASSWORD: "${N8N_POSTGRES_PASSWORD}", N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}", EXECUTIONS_MODE: queue, QUEUE_BULL_REDIS_HOST: n8n_redis_redis, QUEUE_BULL_REDIS_PORT: 6379, GENERIC_TIMEZONE: America/Sao_Paulo}
+    volumes: [n8n_data:/home/node/.n8n]
+    deploy: {replicas: 1, placement: { constraints: [node.role == manager] }}
+volumes: { n8n_data: { external: true } }
+networks: { GrowthNet: { external: true, name: GrowthNet }, proxy: { external: true, name: proxy } }
 EOF
 deploy_stack_via_portainer "n8n_redis" "/opt/n8n/n8n_redis.yaml"
 deploy_stack_via_portainer "n8n_postgres" "/opt/n8n/n8n_postgres.yaml"
@@ -560,102 +419,38 @@ log "Aguardando dependências do N8N..."
 sleep 15
 deploy_stack_via_portainer "n8n" "/opt/n8n/n8n.yaml"
 
-# ETAPA 11: PREPARAR E DEPLOYAR EVOLUTION
-log "=== ETAPA 11: DEPLOYANDO EVOLUTION VIA API ==="
+# ETAPA 10: PREPARAR E DEPLOYAR EVOLUTION
+log "=== ETAPA 10: DEPLOYANDO EVOLUTION VIA API ==="
 docker volume create evolution_redis_data 2>/dev/null || true
 docker volume create evolution_postgres_data 2>/dev/null || true
 docker volume create evolution_instances 2>/dev/null || true
 mkdir -p /opt/evolution
 cat > /opt/evolution/evolution_redis.yaml << EOF
 version: '3.7'
-services:
-  redis:
-    image: redis:latest
-    command: redis-server --appendonly yes
-    volumes:
-      - evolution_redis_data:/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-volumes:
-  evolution_redis_data:
-    external: true
-networks:
-  GrowthNet:
-    external: true
-    name: GrowthNet
+services: { redis: { image: redis:latest, command: redis-server --appendonly yes, volumes: [evolution_redis_data:/data], networks: [GrowthNet], deploy: { mode: replicated, replicas: 1, placement: { constraints: [node.role == manager] } } } }
+volumes: { evolution_redis_data: { external: true } }
+networks: { GrowthNet: { external: true, name: GrowthNet } }
 EOF
 cat > /opt/evolution/evolution_postgres.yaml << EOF
 version: '3.7'
-services:
-  postgres:
-    image: postgres:13
-    environment:
-      - "POSTGRES_PASSWORD=${EVOLUTION_POSTGRES_PASSWORD}"
-      - "POSTGRES_USER=postgres"
-    volumes:
-      - evolution_postgres_data:/var/lib/postgresql/data
-    networks:
-      - GrowthNet
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-volumes:
-  evolution_postgres_data:
-    external: true
-networks:
-  GrowthNet:
-    external: true
-    name: GrowthNet
+services: { postgres: { image: postgres:13, environment: ["POSTGRES_PASSWORD=${EVOLUTION_POSTGRES_PASSWORD}", "POSTGRES_USER=postgres"], volumes: [evolution_postgres_data:/var/lib/postgresql/data], networks: [GrowthNet], deploy: { mode: replicated, replicas: 1, placement: { constraints: [node.role == manager] } } } }
+volumes: { evolution_postgres_data: { external: true } }
+networks: { GrowthNet: { external: true, name: GrowthNet } }
 EOF
 cat > /opt/evolution/evolution.yaml << EOF
 version: '3.7'
 services:
   evolution:
     image: atendai/evolution-api:latest
-    volumes:
-      - evolution_instances:/evolution/instances
-    networks:
-      - GrowthNet
-      - proxy
-    environment:
-      SERVER_URL: "https://${EVOLUTION_DOMAIN}"
-      AUTHENTICATION_API_KEY: "${EVOLUTION_API_KEY}"
-      DATABASE_ENABLED: "true"
-      DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: "postgresql://postgres:${EVOLUTION_POSTGRES_PASSWORD}@evolution_postgres_postgres:5432/evolution"
-      CACHE_REDIS_ENABLED: "true"
-      CACHE_REDIS_URI: "redis://evolution_redis_redis:6379/8"
+    volumes: [evolution_instances:/evolution/instances]
+    networks: [GrowthNet, proxy]
+    environment: {SERVER_URL: "https://${EVOLUTION_DOMAIN}", AUTHENTICATION_API_KEY: "${EVOLUTION_API_KEY}", DATABASE_ENABLED: "true", DATABASE_PROVIDER: postgresql, DATABASE_CONNECTION_URI: "postgresql://postgres:${EVOLUTION_POSTGRES_PASSWORD}@evolution_postgres_postgres:5432/evolution", CACHE_REDIS_ENABLED: "true", CACHE_REDIS_URI: "redis://evolution_redis_redis:6379/8"}
     deploy:
       replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.docker.network=proxy"
-        - "traefik.http.routers.evolution.rule=Host(\`${EVOLUTION_DOMAIN}\`)"
-        - "traefik.http.routers.evolution.entrypoints=websecure"
-        - "traefik.http.routers.evolution.tls.certresolver=letsencryptresolver"
-        - "traefik.http.services.evolution.loadbalancer.server.port=8080"
-volumes:
-  evolution_instances:
-    external: true
-networks:
-  GrowthNet:
-    external: true
-    name: GrowthNet
-  proxy:
-    external: true
-    name: proxy
+      placement: { constraints: [node.role == manager] }
+      labels: ["traefik.enable=true", "traefik.docker.network=proxy", "traefik.http.routers.evolution.rule=Host(\`${EVOLUTION_DOMAIN}\`)", "traefik.http.routers.evolution.entrypoints=websecure", "traefik.http.routers.evolution.tls.certresolver=letsencryptresolver", "traefik.http.services.evolution.loadbalancer.server.port=8080"]
+volumes: { evolution_instances: { external: true } }
+networks: { GrowthNet: { external: true, name: GrowthNet }, proxy: { external: true, name: proxy } }
 EOF
 deploy_stack_via_portainer "evolution_redis" "/opt/evolution/evolution_redis.yaml"
 deploy_stack_via_portainer "evolution_postgres" "/opt/evolution/evolution_postgres.yaml"
@@ -663,8 +458,8 @@ log "Aguardando dependências da Evolution..."
 sleep 15
 deploy_stack_via_portainer "evolution" "/opt/evolution/evolution.yaml"
 
-# ETAPA 12: FINALIZAÇÃO
-log "=== ETAPA 12: FINALIZANDO A INSTALAÇÃO ==="
+# ETAPA 11: FINALIZAÇÃO
+log "=== ETAPA 11: FINALIZANDO A INSTALAÇÃO ==="
 log "Aguardando todos os serviços inicializarem..."
 sleep 60
 
