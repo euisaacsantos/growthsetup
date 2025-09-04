@@ -126,7 +126,8 @@ N8N_EDITOR_SUBDOMAIN=$3
 N8N_WEBHOOK_SUBDOMAIN=$4
 EVOLUTION_SUBDOMAIN=$5
 WEBHOOK_URL=$6
-PORTAINER_PASSWORD=${7:-$(openssl rand -base64 12)}
+# CORREÇÃO: Mudar a geração de senha para 'hex' para evitar caracteres especiais como '/' ou '+'
+PORTAINER_PASSWORD=${7:-$(openssl rand -hex 16)}
 
 # Gerar ID único para esta instalação
 INSTALLATION_ID=$(openssl rand -hex 8)
@@ -136,6 +137,7 @@ PORTAINER_DOMAIN="${PORTAINER_SUBDOMAIN}.${DOMAIN}"
 N8N_EDITOR_DOMAIN="${N8N_EDITOR_SUBDOMAIN}.${DOMAIN}"
 N8N_WEBHOOK_DOMAIN="${N8N_WEBHOOK_SUBDOMAIN}.${DOMAIN}"
 EVOLUTION_DOMAIN="${EVOLUTION_SUBDOMAIN}.${DOMAIN}"
+TRAEFIK_DOMAIN="traefik.${DOMAIN}"
 
 log "=== INICIANDO INSTALAÇÃO COMPLETA DO SERVIDOR ==="
 log "Domínio principal: ${DOMAIN}"
@@ -143,6 +145,7 @@ log "Portainer: https://${PORTAINER_DOMAIN}"
 log "N8N Editor: https://${N8N_EDITOR_DOMAIN}"
 log "N8N Webhook: https://${N8N_WEBHOOK_DOMAIN}"
 log "Evolution: https://${EVOLUTION_DOMAIN}"
+log "Traefik Dashboard: https://${TRAEFIK_DOMAIN}"
 log "Installation ID: ${INSTALLATION_ID}"
 
 # LIMPEZA INICIAL - Garantir que não há processos travados
@@ -183,11 +186,16 @@ apt-get remove -y -qq docker docker-engine docker.io containerd runc 2>/dev/null
 
 # Adicionar chave GPG oficial do Docker
 log "Adicionando chave GPG do Docker..."
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
 
 # Adicionar repositório do Docker
 log "Adicionando repositório do Docker..."
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 # Atualizar e instalar Docker
 apt-get update -qq
@@ -204,7 +212,7 @@ fi
 
 log "Docker instalado com sucesso: $(docker --version)"
 
-# 3. CONFIGURAR DOCKER SWARM (MÉTODO DIRETO)
+# 3. CONFIGURAR DOCKER SWARM
 log "=== ETAPA 3: CONFIGURANDO DOCKER SWARM ==="
 
 # Sempre forçar reinicialização do swarm para garantir estado limpo
@@ -212,7 +220,8 @@ log "Limpando configuração anterior e inicializando Docker Swarm..."
 docker swarm leave --force 2>/dev/null || true
 sleep 2
 
-SERVER_IP=$(hostname -I | awk '{print $1}')
+# CORREÇÃO: Método mais robusto para pegar o IP principal
+SERVER_IP=$(ip route get 1.1.1.1 | awk '{print $7}')
 if docker swarm init --advertise-addr $SERVER_IP; then
     log "Docker Swarm inicializado com sucesso como manager"
 else
@@ -254,6 +263,13 @@ if ! docker volume ls | grep -q "traefik_data"; then
     log "Volume traefik_data criado"
 fi
 
+# CORREÇÃO: Adicionando acesso ao dashboard do Traefik com senha
+log "Gerando credenciais para o dashboard do Traefik..."
+TRAEFIK_USER="admin"
+# CORREÇÃO: Mudar a geração de senha para 'hex' para evitar caracteres especiais
+TRAEFIK_PASSWORD=$(openssl rand -hex 16)
+TRAEFIK_HASHED_PASSWORD=$(htpasswd -nbB ${TRAEFIK_USER} ${TRAEFIK_PASSWORD})
+
 # Criar arquivo de configuração do Traefik
 mkdir -p /opt/traefik
 cat > /opt/traefik/docker-compose.yml << EOF
@@ -263,7 +279,6 @@ services:
     image: traefik:v2.10
     command:
       - --api.dashboard=true
-      - --api.insecure=false
       - --providers.docker=true
       - --providers.docker.swarmMode=true
       - --providers.docker.exposedbydefault=false
@@ -294,7 +309,16 @@ services:
       restart_policy:
         condition: any
       labels:
+        # CORREÇÃO: Labels para expor o dashboard do Traefik de forma segura
         - traefik.enable=true
+        - traefik.http.routers.traefik-dashboard.rule=Host(\`${TRAEFIK_DOMAIN}\`)
+        - traefik.http.routers.traefik-dashboard.entrypoints=websecure
+        - traefik.http.routers.traefik-dashboard.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.traefik-dashboard.service=api@internal
+        - traefik.http.routers.traefik-dashboard.middlewares=traefik-auth
+        - traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_HASHED_PASSWORD}
+
+        # Middleware para redirecionamento HTTP -> HTTPS
         - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
         - traefik.http.routers.redirect-https.rule=hostregexp(\`{host:.+}\`)
         - traefik.http.routers.redirect-https.entrypoints=web
@@ -328,9 +352,6 @@ if ! docker volume ls | grep -q "portainer_data"; then
     log "Volume portainer_data criado"
 fi
 
-# Hash da senha para Portainer (bcrypt)
-PORTAINER_PASSWORD_HASH=$(htpasswd -bnBC 10 "" "$PORTAINER_PASSWORD" | cut -d: -f2)
-
 # Criar arquivo docker-compose do Portainer
 mkdir -p /opt/portainer
 cat > /opt/portainer/docker-compose.yml << EOF
@@ -339,7 +360,6 @@ services:
   portainer:
     image: portainer/portainer-ce:latest
     command: 
-      - --admin-password='${PORTAINER_PASSWORD_HASH}'
       - --host=unix:///var/run/docker.sock
       - --logo="https://www.growthtap.com.br/logo.png"
     volumes:
@@ -381,9 +401,9 @@ sleep 30
 
 # Configurar senha via API
 log "Configurando senha administrativa do Portainer..."
-for i in 1 2 3 4 5; do
-    # Tentar configurar via API
-    SETUP_RESPONSE=$(curl -s -X POST "https://${PORTAINER_DOMAIN}/api/users/admin/init" \
+for i in {1..5}; do
+    # CORREÇÃO: Adicionado -k para ignorar verificação de SSL temporariamente
+    SETUP_RESPONSE=$(curl -s -k -X POST "https://${PORTAINER_DOMAIN}/api/users/admin/init" \
         -H "Content-Type: application/json" \
         -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_PASSWORD}\"}" \
         -w "%{http_code}" -o /tmp/portainer_setup.log)
@@ -399,7 +419,7 @@ for i in 1 2 3 4 5; do
     fi
     
     if [ $i -eq 5 ]; then
-        warning "Não foi possível configurar senha via API. Use a interface web."
+        warning "Não foi possível configurar senha via API. A senha pode já ter sido definida ou o serviço está inacessível."
     fi
 done
 
@@ -808,6 +828,11 @@ Data: $(date)
 Domain: ${DOMAIN}
 Installation ID: ${INSTALLATION_ID}
 
+=== TRAEFIK DASHBOARD ===
+URL: https://${TRAEFIK_DOMAIN}
+Username: ${TRAEFIK_USER}
+Password: ${TRAEFIK_PASSWORD}
+
 === PORTAINER ===
 URL: https://${PORTAINER_DOMAIN}
 Username: admin
@@ -886,6 +911,7 @@ test_url() {
     log "Testando conectividade: $name"
     
     while [ $attempt -le $max_attempts ]; do
+        # CORREÇÃO: Adicionado -k para ignorar verificação de SSL durante o teste
         if curl -s -k --connect-timeout 5 --max-time 10 "$url" > /dev/null 2>&1; then
             log "✓ $name está acessível"
             return 0
@@ -929,6 +955,11 @@ echo "=================================================="
 echo ""
 echo "🌐 DOMÍNIO PRINCIPAL: ${DOMAIN}"
 echo ""
+echo "📈 TRAEFIK (Proxy Reverso)"
+echo "   URL: https://${TRAEFIK_DOMAIN}"
+echo "   Usuário: ${TRAEFIK_USER}"
+echo "   Senha: ${TRAEFIK_PASSWORD}"
+echo ""
 echo "🔧 PORTAINER (Gerenciamento Docker)"
 echo "   URL: https://${PORTAINER_DOMAIN}"
 echo "   Usuário: admin"
@@ -944,20 +975,13 @@ echo "   API: https://${EVOLUTION_DOMAIN}"
 echo "   Manager: https://${EVOLUTION_DOMAIN}/manager"
 echo "   API Key: ${EVOLUTION_API_KEY}"
 echo ""
-echo "📋 STACKS DOCKER INSTALADAS:"
-echo "   • traefik (Proxy Reverso + SSL)"
-echo "   • portainer (Interface de Gerenciamento)"
-echo "   • n8n_redis, n8n_postgres, n8n (Automação)"
-echo "   • evolution_redis, evolution_postgres, evolution (WhatsApp API)"
-echo ""
-echo "💾 CREDENCIAIS SALVAS EM:"
+echo "📋 CREDENCIAIS SALVAS EM:"
 echo "   ${CREDENTIALS_DIR}/server_complete.txt"
 echo ""
 echo "🚀 PRÓXIMOS PASSOS:"
-echo "   1. Acesse o Portainer para gerenciar containers"
-echo "   2. Configure seu primeiro workflow no N8N"
-echo "   3. Conecte suas instâncias WhatsApp na Evolution API"
-echo "   4. Use o N8N para automatizar integrações entre sistemas"
+echo "   1. Acesse o Portainer e o Traefik para gerenciar o ambiente."
+echo "   2. Configure seu primeiro workflow no N8N."
+echo "   3. Conecte suas instâncias WhatsApp na Evolution API."
 echo ""
 echo "=================================================="
 
@@ -968,3 +992,4 @@ log "Webhook de conclusão enviado. Instalação finalizada!"
 log "Installation ID: ${INSTALLATION_ID}"
 
 exit 0
+
