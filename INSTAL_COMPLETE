@@ -289,6 +289,8 @@ services:
   portainer:
     image: portainer/portainer-ce:latest
     command: --host=unix:///var/run/docker.sock --logo="https://www.growthtap.com.br/logo.png"
+    ports:
+      - "9000:9000"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "portainer_data:/data"
@@ -317,23 +319,23 @@ networks:
 EOF
 log "Fazendo deploy do Portainer via Docker..."
 docker stack deploy -c /opt/portainer/docker-compose.yml portainer
-log "Aguardando infraestrutura (Traefik e Portainer) inicializar e obter SSL..."
-sleep 60
+log "Aguardando Portainer inicializar..."
+sleep 30
 
 # ==============================================================================
 # ETAPA 8: CONFIGURAR SENHA E OBTER TOKEN DA API PORTAINER
 # ==============================================================================
-log "=== ETAPA 8: CONFIGURANDO PORTAINER E API ==="
+log "=== ETAPA 8: CONFIGURANDO PORTAINER E API VIA LOCALHOST ==="
 log "Configurando senha administrativa do Portainer..."
 for i in {1..10}; do
-    SETUP_RESPONSE=$(curl -s -k -X POST "https://${PORTAINER_DOMAIN}/api/users/admin/init" -H "Content-Type: application/json" -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_PASSWORD}\"}" -w "%{http_code}" -o /dev/null)
-    if [ "$SETUP_RESPONSE" = "200" ] || [ "$SETUP_RESPONSE" = "409" ]; then log "Senha do Portainer configurada com sucesso"; break; else log "Tentativa $i/10 de configuração da senha... (HTTP: $SETUP_RESPONSE)"; sleep 10; fi
+    SETUP_RESPONSE=$(curl -s -X POST "http://localhost:9000/api/users/admin/init" -H "Content-Type: application/json" -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_PASSWORD}\"}" -w "%{http_code}" -o /dev/null)
+    if [ "$SETUP_RESPONSE" = "200" ] || [ "$SETUP_RESPONSE" = "409" ]; then log "Senha do Portainer configurada com sucesso"; break; else log "Tentativa $i/10 de configuração da senha... (HTTP: $SETUP_RESPONSE)"; sleep 5; fi
     if [ $i -eq 10 ]; then error_exit "Não foi possível configurar senha do Portainer via API."; fi
 done
 
 log "Obtendo token de autenticação (JWT) do Portainer..."
 for i in {1..5}; do
-    AUTH_RESPONSE=$(curl -s -k -X POST "https://${PORTAINER_DOMAIN}/api/auth" -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"${PORTAINER_PASSWORD}\"}")
+    AUTH_RESPONSE=$(curl -s -X POST "http://localhost:9000/api/auth" -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"${PORTAINER_PASSWORD}\"}")
     PORTAINER_JWT=$(echo $AUTH_RESPONSE | jq -r .jwt)
     if [ "$PORTAINER_JWT" != "null" ]; then log "Token JWT obtido com sucesso."; break; else log "Tentativa $i/5 para obter token..."; sleep 5; fi
     if [ $i -eq 5 ]; then error_exit "Não foi possível obter o token de autenticação do Portainer."; fi
@@ -341,7 +343,7 @@ done
 
 log "Obtendo ID do endpoint do Swarm..."
 for i in {1..5}; do
-    PORTAINER_ENDPOINT_ID=$(curl -s -k -X GET "https://${PORTAINER_DOMAIN}/api/endpoints" -H "Authorization: Bearer ${PORTAINER_JWT}" | jq '.[0].Id')
+    PORTAINER_ENDPOINT_ID=$(curl -s -X GET "http://localhost:9000/api/endpoints" -H "Authorization: Bearer ${PORTAINER_JWT}" | jq '.[0].Id')
     if [ -n "$PORTAINER_ENDPOINT_ID" ] && [ "$PORTAINER_ENDPOINT_ID" != "null" ]; then log "Endpoint ID encontrado: ${PORTAINER_ENDPOINT_ID}"; break; else log "Tentativa $i/5 para obter endpoint ID..."; sleep 5; fi
     if [ $i -eq 5 ]; then error_exit "Não foi possível obter o Endpoint ID do Portainer."; fi
 done
@@ -369,8 +371,8 @@ deploy_stack_via_portainer() {
       '{Name: $name, SwarmID: $swarm_id, StackFileContent: $content, Env: []}')
 
     # Fazer a chamada API com o payload pré-construído
-    API_RESPONSE=$(curl -s -k -X POST \
-        "https://${PORTAINER_DOMAIN}/api/stacks?type=1&method=string&endpointId=${PORTAINER_ENDPOINT_ID}" \
+    API_RESPONSE=$(curl -s -X POST \
+        "http://localhost:9000/api/stacks?type=1&method=string&endpointId=${PORTAINER_ENDPOINT_ID}" \
         -H "Authorization: Bearer ${PORTAINER_JWT}" \
         -H "Content-Type: application/json" \
         -d "${json_payload}")
