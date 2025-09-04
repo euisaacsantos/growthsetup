@@ -77,7 +77,7 @@ send_final_webhook() {
     "password": "${PORTAINER_PASSWORD}"
   },
   "n8n": {
-    "editor_url": "https://${N8N_DOMAIN}",
+    "editor_url": "https://${N8N_EDITOR_DOMAIN}",
     "webhook_url": "https://${N8N_WEBHOOK_DOMAIN}",
     "encryption_key": "${N8N_ENCRYPTION_KEY}",
     "suggested_password": "${N8N_SUGGESTED_PASSWORD}"
@@ -116,30 +116,32 @@ error_exit() {
 }
 
 # Verificar parâmetros
-if [ $# -lt 5 ]; then
-    error_exit "Uso: $0 DOMAIN PORTAINER_SUBDOMAIN N8N_SUBDOMAIN EVOLUTION_SUBDOMAIN WEBHOOK_URL [PORTAINER_PASSWORD]"
+if [ $# -lt 6 ]; then
+    error_exit "Uso: $0 DOMAIN PORTAINER_SUBDOMAIN N8N_EDITOR_SUBDOMAIN N8N_WEBHOOK_SUBDOMAIN EVOLUTION_SUBDOMAIN WEBHOOK_URL [PORTAINER_PASSWORD]"
 fi
 
 DOMAIN=$1
 PORTAINER_SUBDOMAIN=$2
-N8N_SUBDOMAIN=$3
-EVOLUTION_SUBDOMAIN=$4
-WEBHOOK_URL=$5
-PORTAINER_PASSWORD=${6:-$(openssl rand -base64 12)}
+N8N_EDITOR_SUBDOMAIN=$3
+N8N_WEBHOOK_SUBDOMAIN=$4
+EVOLUTION_SUBDOMAIN=$5
+WEBHOOK_URL=$6
+PORTAINER_PASSWORD=${7:-$(openssl rand -base64 12)}
 
 # Gerar ID único para esta instalação
 INSTALLATION_ID=$(openssl rand -hex 8)
 
 # Construir domínios completos
 PORTAINER_DOMAIN="${PORTAINER_SUBDOMAIN}.${DOMAIN}"
-N8N_DOMAIN="${N8N_SUBDOMAIN}.${DOMAIN}"
-N8N_WEBHOOK_DOMAIN="webhook.${DOMAIN}"
+N8N_EDITOR_DOMAIN="${N8N_EDITOR_SUBDOMAIN}.${DOMAIN}"
+N8N_WEBHOOK_DOMAIN="${N8N_WEBHOOK_SUBDOMAIN}.${DOMAIN}"
 EVOLUTION_DOMAIN="${EVOLUTION_SUBDOMAIN}.${DOMAIN}"
 
 log "=== INICIANDO INSTALAÇÃO COMPLETA DO SERVIDOR ==="
 log "Domínio principal: ${DOMAIN}"
 log "Portainer: https://${PORTAINER_DOMAIN}"
-log "N8N: https://${N8N_DOMAIN}"
+log "N8N Editor: https://${N8N_EDITOR_DOMAIN}"
+log "N8N Webhook: https://${N8N_WEBHOOK_DOMAIN}"
 log "Evolution: https://${EVOLUTION_DOMAIN}"
 log "Installation ID: ${INSTALLATION_ID}"
 
@@ -195,21 +197,30 @@ fi
 
 log "Docker instalado com sucesso: $(docker --version)"
 
-# 3. CONFIGURAR DOCKER SWARM
+# 3. CONFIGURAR DOCKER SWARM (MÉTODO DIRETO)
 log "=== ETAPA 3: CONFIGURANDO DOCKER SWARM ==="
 
-# Verificar se já está em swarm mode
-if docker info --format '{{.Swarm.LocalNodeState}}' | grep -q "active"; then
-    log "Docker Swarm já está ativo"
+# Sempre forçar reinicialização do swarm para garantir estado limpo
+log "Limpando configuração anterior e inicializando Docker Swarm..."
+docker swarm leave --force 2>/dev/null || true
+sleep 2
+
+SERVER_IP=$(hostname -I | awk '{print $1}')
+if docker swarm init --advertise-addr $SERVER_IP; then
+    log "Docker Swarm inicializado com sucesso como manager"
 else
-    log "Inicializando Docker Swarm..."
-    SERVER_IP=$(hostname -I | awk '{print $1}')
-    docker swarm init --advertise-addr $SERVER_IP
-    log "Docker Swarm inicializado com sucesso"
+    error_exit "Falha ao inicializar Docker Swarm"
 fi
 
-# 4. INSTALAR TRAEFIK (necessário para os labels)
-log "=== ETAPA 4: INSTALANDO TRAEFIK ==="
+# Verificar se o swarm está funcionando corretamente
+if ! docker node ls >/dev/null 2>&1; then
+    error_exit "Docker Swarm não está funcionando corretamente"
+fi
+
+log "Docker Swarm configurado e operacional"
+
+# 4. CRIAR REDES
+log "=== ETAPA 4: CRIANDO REDES ==="
 
 # Criar rede proxy se não existir
 if ! docker network ls | grep -q "proxy"; then
@@ -219,6 +230,17 @@ else
     log "Rede proxy já existe"
 fi
 
+# Criar rede GrowthNet se não existir
+if ! docker network ls | grep -q "GrowthNet"; then
+    docker network create --driver overlay --attachable GrowthNet
+    log "Rede GrowthNet criada"
+else
+    log "Rede GrowthNet já existe"
+fi
+
+# 5. INSTALAR TRAEFIK
+log "=== ETAPA 5: INSTALANDO TRAEFIK ==="
+
 # Criar volume para Traefik se não existir
 if ! docker volume ls | grep -q "traefik_data"; then
     docker volume create traefik_data
@@ -227,7 +249,7 @@ fi
 
 # Criar arquivo de configuração do Traefik
 mkdir -p /opt/traefik
-cat > /opt/traefik/docker-compose.yml << 'EOL'
+cat > /opt/traefik/docker-compose.yml << EOF
 version: '3.7'
 services:
   traefik:
@@ -267,7 +289,7 @@ services:
       labels:
         - traefik.enable=true
         - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
-        - traefik.http.routers.redirect-https.rule=hostregexp(`{host:.+}`)
+        - traefik.http.routers.redirect-https.rule=hostregexp(\`{host:.+}\`)
         - traefik.http.routers.redirect-https.entrypoints=web
         - traefik.http.routers.redirect-https.middlewares=redirect-to-https
 
@@ -279,20 +301,19 @@ networks:
   proxy:
     external: true
     name: proxy
-EOL
+EOF
 
 # Deploy do Traefik
 log "Fazendo deploy do Traefik..."
 cd /opt/traefik
-sed -i "s/\${DOMAIN}/${DOMAIN}/g" docker-compose.yml
 docker stack deploy -c docker-compose.yml traefik
 
 # Aguardar Traefik inicializar
 log "Aguardando Traefik inicializar..."
 sleep 15
 
-# 5. INSTALAR PORTAINER (COM SENHA AUTOMÁTICA)
-log "=== ETAPA 5: INSTALANDO PORTAINER ==="
+# 6. INSTALAR PORTAINER (COM SENHA AUTOMÁTICA)
+log "=== ETAPA 6: INSTALANDO PORTAINER ==="
 
 # Criar volume para dados do Portainer
 if ! docker volume ls | grep -q "portainer_data"; then
@@ -305,7 +326,7 @@ PORTAINER_PASSWORD_HASH=$(htpasswd -bnBC 10 "" "$PORTAINER_PASSWORD" | tr -d ':\
 
 # Criar arquivo docker-compose do Portainer
 mkdir -p /opt/portainer
-cat > /opt/portainer/docker-compose.yml << EOL
+cat > /opt/portainer/docker-compose.yml << EOF
 version: '3.7'
 services:
   portainer:
@@ -340,27 +361,16 @@ networks:
   proxy:
     external: true
     name: proxy
-EOL
+EOF
 
 # Deploy do Portainer
 log "Fazendo deploy do Portainer..."
 cd /opt/portainer
-sed -i "s/\${PORTAINER_DOMAIN}/${PORTAINER_DOMAIN}/g" docker-compose.yml
-sed -i "s/\${PORTAINER_PASSWORD_HASH}/${PORTAINER_PASSWORD_HASH}/g" docker-compose.yml
 docker stack deploy -c docker-compose.yml portainer
 
 # Aguardar Portainer inicializar
 log "Aguardando Portainer inicializar..."
 sleep 20
-
-# 6. CRIAR REDE GROWTHNET
-log "=== ETAPA 6: CRIANDO REDE GROWTHNET ==="
-if ! docker network ls | grep -q "GrowthNet"; then
-    docker network create --driver overlay --attachable GrowthNet
-    log "Rede GrowthNet criada"
-else
-    log "Rede GrowthNet já existe"
-fi
 
 # 7. GERAR CREDENCIAIS PARA N8N E EVOLUTION
 log "=== ETAPA 7: GERANDO CREDENCIAIS ==="
@@ -387,6 +397,11 @@ log "Senha sugerida N8N gerada"
 EVOLUTION_API_KEY=$(openssl rand -hex 16)
 log "API key Evolution gerada"
 
+# Gerar senhas PostgreSQL
+N8N_POSTGRES_PASSWORD=$(openssl rand -hex 16)
+EVOLUTION_POSTGRES_PASSWORD=$(openssl rand -hex 16)
+log "Senhas PostgreSQL geradas"
+
 # 8. INSTALAR N8N
 log "=== ETAPA 8: INSTALANDO N8N ==="
 
@@ -395,12 +410,10 @@ docker volume create n8n_data 2>/dev/null || log "Volume n8n_data já existe"
 docker volume create n8n_postgres_data 2>/dev/null || log "Volume n8n_postgres_data já existe"
 docker volume create n8n_redis_data 2>/dev/null || log "Volume n8n_redis_data já existe"
 
-# Gerar senha PostgreSQL para N8N
-N8N_POSTGRES_PASSWORD=$(openssl rand -hex 16)
+mkdir -p /opt/n8n
 
 # Criar stack Redis para N8N
-mkdir -p /opt/n8n
-cat > /opt/n8n/n8n_redis.yaml << 'EOL'
+cat > /opt/n8n/n8n_redis.yaml << EOF
 version: '3.7'
 services:
   redis:
@@ -425,10 +438,10 @@ networks:
   GrowthNet:
     external: true
     name: GrowthNet
-EOL
+EOF
 
 # Criar stack PostgreSQL para N8N
-cat > /opt/n8n/n8n_postgres.yaml << EOL
+cat > /opt/n8n/n8n_postgres.yaml << EOF
 version: '3.7'
 services:
   postgres:
@@ -456,10 +469,10 @@ networks:
   GrowthNet:
     external: true
     name: GrowthNet
-EOL
+EOF
 
 # Criar stack principal N8N
-cat > /opt/n8n/n8n.yaml << EOL
+cat > /opt/n8n/n8n.yaml << EOF
 version: "3.7"
 services:
   n8n_editor:
@@ -477,8 +490,8 @@ services:
       - DB_POSTGRESDB_PASSWORD=${N8N_POSTGRES_PASSWORD}
       - N8N_PAYLOAD_SIZE_MAX=67108864
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - N8N_HOST=${N8N_DOMAIN}
-      - N8N_EDITOR_BASE_URL=https://${N8N_DOMAIN}/
+      - N8N_HOST=${N8N_EDITOR_DOMAIN}
+      - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
       - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
       - N8N_PROTOCOL=https
       - N8N_PORT=5678
@@ -500,7 +513,7 @@ services:
       labels:
         - traefik.enable=true
         - traefik.docker.network=proxy
-        - traefik.http.routers.n8n.rule=Host(\`${N8N_DOMAIN}\`)
+        - traefik.http.routers.n8n.rule=Host(\`${N8N_EDITOR_DOMAIN}\`)
         - traefik.http.routers.n8n.entrypoints=websecure
         - traefik.http.routers.n8n.tls.certresolver=letsencryptresolver
         - traefik.http.services.n8n.loadbalancer.server.port=5678
@@ -520,8 +533,8 @@ services:
       - DB_POSTGRESDB_PASSWORD=${N8N_POSTGRES_PASSWORD}
       - N8N_PAYLOAD_SIZE_MAX=67108864
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
-      - N8N_HOST=${N8N_DOMAIN}
-      - N8N_EDITOR_BASE_URL=https://${N8N_DOMAIN}/
+      - N8N_HOST=${N8N_EDITOR_DOMAIN}
+      - N8N_EDITOR_BASE_URL=https://${N8N_EDITOR_DOMAIN}/
       - WEBHOOK_URL=https://${N8N_WEBHOOK_DOMAIN}/
       - N8N_PROTOCOL=https
       - N8N_PORT=5678
@@ -588,7 +601,7 @@ networks:
   proxy:
     external: true
     name: proxy
-EOL
+EOF
 
 # Deploy das stacks N8N
 log "Fazendo deploy das stacks N8N..."
@@ -610,13 +623,10 @@ docker volume create evolution_redis_data 2>/dev/null || log "Volume evolution_r
 docker volume create evolution_postgres_data 2>/dev/null || log "Volume evolution_postgres_data já existe"  
 docker volume create evolution_instances 2>/dev/null || log "Volume evolution_instances já existe"
 
-# Gerar senha PostgreSQL Evolution (aleatória)
-EVOLUTION_POSTGRES_PASSWORD=$(openssl rand -hex 16)
-
 mkdir -p /opt/evolution
 
 # Criar stack Redis para Evolution
-cat > /opt/evolution/evolution_redis.yaml << 'EOL'
+cat > /opt/evolution/evolution_redis.yaml << EOF
 version: '3.7'
 services:
   redis:
@@ -641,10 +651,10 @@ networks:
   GrowthNet:
     external: true
     name: GrowthNet
-EOL
+EOF
 
 # Criar stack PostgreSQL para Evolution
-cat > /opt/evolution/evolution_postgres.yaml << EOL
+cat > /opt/evolution/evolution_postgres.yaml << EOF
 version: '3.7'
 services:
   postgres:
@@ -671,10 +681,10 @@ networks:
   GrowthNet:
     external: true
     name: GrowthNet
-EOL
+EOF
 
 # Criar stack principal Evolution
-cat > /opt/evolution/evolution.yaml << EOL
+cat > /opt/evolution/evolution.yaml << EOF
 version: '3.7'
 services:
   evolution:
@@ -732,7 +742,7 @@ networks:
   proxy:
     external: true
     name: proxy
-EOL
+EOF
 
 # Deploy das stacks Evolution
 log "Fazendo deploy das stacks Evolution..."
@@ -771,7 +781,7 @@ Username: admin
 Password: ${PORTAINER_PASSWORD}
 
 === N8N ===
-Editor URL: https://${N8N_DOMAIN}
+Editor URL: https://${N8N_EDITOR_DOMAIN}
 Webhook URL: https://${N8N_WEBHOOK_DOMAIN}
 Senha sugerida: ${N8N_SUGGESTED_PASSWORD}
 Encryption Key: ${N8N_ENCRYPTION_KEY}
@@ -863,7 +873,7 @@ sleep 30
 
 # Testar URLs principais
 test_url "https://${PORTAINER_DOMAIN}" "Portainer"
-test_url "https://${N8N_DOMAIN}" "N8N"
+test_url "https://${N8N_EDITOR_DOMAIN}" "N8N Editor"
 test_url "https://${EVOLUTION_DOMAIN}" "Evolution API"
 
 # 14. LIMPEZA
@@ -892,7 +902,7 @@ echo "   Usuário: admin"
 echo "   Senha: ${PORTAINER_PASSWORD}"
 echo ""
 echo "⚡ N8N (Automação/Workflows)"
-echo "   Editor: https://${N8N_DOMAIN}"
+echo "   Editor: https://${N8N_EDITOR_DOMAIN}"
 echo "   Webhooks: https://${N8N_WEBHOOK_DOMAIN}"
 echo "   Senha sugerida: ${N8N_SUGGESTED_PASSWORD}"
 echo ""
