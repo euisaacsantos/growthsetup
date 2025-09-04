@@ -322,7 +322,7 @@ if ! docker volume ls | grep -q "portainer_data"; then
 fi
 
 # Hash da senha para Portainer (bcrypt)
-PORTAINER_PASSWORD_HASH=$(htpasswd -bnBC 10 "" "$PORTAINER_PASSWORD" | tr -d ':\n' | sed 's/^[^$]*\$//')
+PORTAINER_PASSWORD_HASH=$(htpasswd -bnBC 10 "" "$PORTAINER_PASSWORD" | cut -d: -f2)
 
 # Criar arquivo docker-compose do Portainer
 mkdir -p /opt/portainer
