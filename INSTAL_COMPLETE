@@ -172,7 +172,8 @@ apt-get install -y -qq apt-transport-https ca-certificates curl gnupg lsb-releas
 log "=== ETAPA 2: INSTALANDO DOCKER ==="
 apt-get remove -y -qq docker docker-engine docker.io containerd runc 2>/dev/null || true
 install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+# CORREÇÃO: Adicionado --yes ao gpg para evitar prompt interativo
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --yes --dearmor -o /etc/apt/keyrings/docker.gpg
 chmod a+r /etc/apt/keyrings/docker.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 apt-get update -qq
@@ -328,14 +329,16 @@ sleep 30
 log "=== ETAPA 8: CONFIGURANDO PORTAINER E API VIA LOCALHOST ==="
 log "Configurando senha administrativa do Portainer..."
 for i in {1..10}; do
-    SETUP_RESPONSE=$(curl -s -X POST "http://localhost:9000/api/users/admin/init" -H "Content-Type: application/json" -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_PASSWORD}\"}" -w "%{http_code}" -o /dev/null)
+    # CORREÇÃO: Adicionado --connect-timeout 5 para evitar travamento
+    SETUP_RESPONSE=$(curl -s --connect-timeout 5 -X POST "http://localhost:9000/api/users/admin/init" -H "Content-Type: application/json" -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_PASSWORD}\"}" -w "%{http_code}" -o /dev/null)
     if [ "$SETUP_RESPONSE" = "200" ] || [ "$SETUP_RESPONSE" = "409" ]; then log "Senha do Portainer configurada com sucesso"; break; else log "Tentativa $i/10 de configuração da senha... (HTTP: $SETUP_RESPONSE)"; sleep 5; fi
     if [ $i -eq 10 ]; then error_exit "Não foi possível configurar senha do Portainer via API."; fi
 done
 
 log "Obtendo token de autenticação (JWT) do Portainer..."
 for i in {1..5}; do
-    AUTH_RESPONSE=$(curl -s -X POST "http://localhost:9000/api/auth" -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"${PORTAINER_PASSWORD}\"}")
+    # CORREÇÃO: Adicionado --connect-timeout 5 para evitar travamento
+    AUTH_RESPONSE=$(curl -s --connect-timeout 5 -X POST "http://localhost:9000/api/auth" -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"${PORTAINER_PASSWORD}\"}")
     PORTAINER_JWT=$(echo $AUTH_RESPONSE | jq -r .jwt)
     if [ "$PORTAINER_JWT" != "null" ]; then log "Token JWT obtido com sucesso."; break; else log "Tentativa $i/5 para obter token..."; sleep 5; fi
     if [ $i -eq 5 ]; then error_exit "Não foi possível obter o token de autenticação do Portainer."; fi
@@ -343,7 +346,8 @@ done
 
 log "Obtendo ID do endpoint do Swarm..."
 for i in {1..5}; do
-    PORTAINER_ENDPOINT_ID=$(curl -s -X GET "http://localhost:9000/api/endpoints" -H "Authorization: Bearer ${PORTAINER_JWT}" | jq '.[0].Id')
+    # CORREÇÃO: Adicionado --connect-timeout 5 para evitar travamento
+    PORTAINER_ENDPOINT_ID=$(curl -s --connect-timeout 5 -X GET "http://localhost:9000/api/endpoints" -H "Authorization: Bearer ${PORTAINER_JWT}" | jq '.[0].Id')
     if [ -n "$PORTAINER_ENDPOINT_ID" ] && [ "$PORTAINER_ENDPOINT_ID" != "null" ]; then log "Endpoint ID encontrado: ${PORTAINER_ENDPOINT_ID}"; break; else log "Tentativa $i/5 para obter endpoint ID..."; sleep 5; fi
     if [ $i -eq 5 ]; then error_exit "Não foi possível obter o Endpoint ID do Portainer."; fi
 done
