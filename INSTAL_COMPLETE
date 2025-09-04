@@ -145,6 +145,13 @@ log "N8N Webhook: https://${N8N_WEBHOOK_DOMAIN}"
 log "Evolution: https://${EVOLUTION_DOMAIN}"
 log "Installation ID: ${INSTALLATION_ID}"
 
+# LIMPEZA INICIAL - Garantir que não há processos travados
+log "Verificando processos em execução..."
+# Matar processos apt que possam estar travados
+killall apt apt-get dpkg unattended-upgrades 2>/dev/null || true
+# Aguardar um momento
+sleep 5
+
 # 1. ATUALIZAR SISTEMA
 log "=== ETAPA 1: ATUALIZANDO SISTEMA ==="
 export DEBIAN_FRONTEND=noninteractive
