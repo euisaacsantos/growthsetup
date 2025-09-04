@@ -163,7 +163,8 @@ apt-get install -y -qq \
     software-properties-common \
     jq \
     openssl \
-    wget
+    wget \
+    apache2-utils
 
 # 2. INSTALAR DOCKER
 log "=== ETAPA 2: INSTALANDO DOCKER ==="
