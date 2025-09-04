@@ -365,6 +365,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
+      - /opt:/opt
     networks:
       - proxy
     deploy:
@@ -992,4 +993,5 @@ log "Webhook de conclusão enviado. Instalação finalizada!"
 log "Installation ID: ${INSTALLATION_ID}"
 
 exit 0
+
 
