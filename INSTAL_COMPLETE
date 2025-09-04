@@ -158,25 +158,17 @@ killall apt apt-get dpkg unattended-upgrades 2>/dev/null || true
 sleep 5
 
 # ==============================================================================
-# ETAPA 0: REMOVENDO STACKS ANTERIORES
+# ETAPA 1: ATUALIZANDO SISTEMA
 # ==============================================================================
-log "=== ETAPA 0: REMOVENDO STACKS E VOLUMES ANTERIORES ==="
-log "Limpando instalações anteriores para garantir um ambiente limpo..."
-docker stack rm portainer traefik n8n n8n_redis n8n_postgres evolution evolution_redis evolution_postgres 2>/dev/null || true
-log "Aguardando a remoção completa das stacks..."
-sleep 15
-# Limpar também os volumes para garantir que as senhas do PG sejam novas
-docker volume rm $(docker volume ls -q | grep -E "n8n|evolution|portainer|traefik") 2>/dev/null || true
-log "Volumes antigos removidos."
-
-# 1. ATUALIZAR SISTEMA
 log "=== ETAPA 1: ATUALIZANDO SISTEMA ==="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get upgrade -y -qq
 apt-get install -y -qq apt-transport-https ca-certificates curl gnupg lsb-release software-properties-common jq openssl wget apache2-utils
 
-# 2. INSTALAR DOCKER
+# ==============================================================================
+# ETAPA 2: INSTALANDO DOCKER
+# ==============================================================================
 log "=== ETAPA 2: INSTALANDO DOCKER ==="
 apt-get remove -y -qq docker docker-engine docker.io containerd runc 2>/dev/null || true
 install -m 0755 -d /etc/apt/keyrings
@@ -189,23 +181,39 @@ systemctl start docker && systemctl enable docker
 if ! docker --version > /dev/null 2>&1; then error_exit "Falha na instalação do Docker"; fi
 log "Docker instalado com sucesso: $(docker --version)"
 
-# 3. CONFIGURAR DOCKER SWARM
-log "=== ETAPA 3: CONFIGURANDO DOCKER SWARM ==="
+# ==============================================================================
+# ETAPA 3: LIMPEZA DO AMBIENTE DOCKER
+# ==============================================================================
+log "=== ETAPA 3: REMOVENDO STACKS E VOLUMES ANTERIORES ==="
+log "Limpando instalações anteriores para garantir um ambiente limpo..."
+docker stack rm portainer traefik n8n n8n_redis n8n_postgres evolution evolution_redis evolution_postgres 2>/dev/null || true
+log "Aguardando a remoção completa das stacks..."
+sleep 15
+# Limpar também os volumes para garantir que as senhas do PG sejam novas
+docker volume rm $(docker volume ls -q | grep -E "n8n|evolution|portainer|traefik") 2>/dev/null || true
+log "Volumes antigos removidos."
+
+# ==============================================================================
+# ETAPA 4: CONFIGURANDO DOCKER SWARM
+# ==============================================================================
+log "=== ETAPA 4: CONFIGURANDO DOCKER SWARM ==="
 docker swarm leave --force 2>/dev/null || true
 sleep 2
 SERVER_IP=$(ip route get 1.1.1.1 | awk '{print $7}')
 if docker swarm init --advertise-addr $SERVER_IP; then log "Docker Swarm inicializado com sucesso"; else error_exit "Falha ao inicializar Docker Swarm"; fi
 log "Docker Swarm configurado e operacional"
 
-# 4. CRIAR REDES
-log "=== ETAPA 4: CRIANDO REDES ==="
+# ==============================================================================
+# ETAPA 5: CRIANDO REDES
+# ==============================================================================
+log "=== ETAPA 5: CRIANDO REDES ==="
 docker network create --driver overlay --attachable proxy 2>/dev/null || log "Rede proxy já existe"
 docker network create --driver overlay --attachable GrowthNet 2>/dev/null || log "Rede GrowthNet já existe"
 
 # ==============================================================================
-# ETAPA 5: INSTALAR APENAS O PORTAINER
+# ETAPA 6: INSTALAR APENAS O PORTAINER
 # ==============================================================================
-log "=== ETAPA 5: INSTALANDO PORTAINER ==="
+log "=== ETAPA 6: INSTALANDO PORTAINER ==="
 docker volume create portainer_data 2>/dev/null || true
 mkdir -p /opt/portainer
 cat > /opt/portainer/docker-compose.yml << EOF
@@ -247,9 +255,9 @@ log "Aguardando Portainer inicializar..."
 sleep 45
 
 # ==============================================================================
-# ETAPA 6: CONFIGURAR SENHA E OBTER TOKEN DA API PORTAINER
+# ETAPA 7: CONFIGURAR SENHA E OBTER TOKEN DA API PORTAINER
 # ==============================================================================
-log "=== ETAPA 6: CONFIGURANDO PORTAINER E API ==="
+log "=== ETAPA 7: CONFIGURANDO PORTAINER E API ==="
 log "Configurando senha administrativa do Portainer..."
 for i in {1..10}; do
     SETUP_RESPONSE=$(curl -s -k -X POST "https://${PORTAINER_DOMAIN}/api/users/admin/init" -H "Content-Type: application/json" -d "{\"Username\":\"admin\",\"Password\":\"${PORTAINER_PASSWORD}\"}" -w "%{http_code}" -o /dev/null)
@@ -304,8 +312,8 @@ EOF
 }
 # ==============================================================================
 
-# 7. GERAR CREDENCIAIS
-log "=== ETAPA 7: GERANDO CREDENCIAIS ==="
+# ETAPA 8: GERAR CREDENCIAIS
+log "=== ETAPA 8: GERANDO CREDENCIAIS ==="
 TRAEFIK_USER="admin"
 TRAEFIK_PASSWORD=$(openssl rand -hex 16)
 TRAEFIK_HASHED_PASSWORD=$(htpasswd -nbB ${TRAEFIK_USER} ${TRAEFIK_PASSWORD})
@@ -317,8 +325,8 @@ N8N_POSTGRES_PASSWORD=$(openssl rand -hex 16)
 EVOLUTION_POSTGRES_PASSWORD=$(openssl rand -hex 16)
 log "Todas as credenciais foram geradas."
 
-# 8. PREPARAR E DEPLOYAR TRAEFIK
-log "=== ETAPA 8: DEPLOYANDO TRAEFIK VIA API ==="
+# ETAPA 9: PREPARAR E DEPLOYAR TRAEFIK
+log "=== ETAPA 9: DEPLOYANDO TRAEFIK VIA API ==="
 docker volume create traefik_data 2>/dev/null || true
 mkdir -p /opt/traefik
 cat > /opt/traefik/docker-compose.yml << EOF
@@ -375,8 +383,8 @@ deploy_stack_via_portainer "traefik" "/opt/traefik/docker-compose.yml"
 log "Aguardando Traefik (necessário para o Portainer obter SSL)..."
 sleep 20 # Traefik precisa estar de pé para o Portainer funcionar com SSL
 
-# 9. PREPARAR E DEPLOYAR N8N
-log "=== ETAPA 9: DEPLOYANDO N8N VIA API ==="
+# ETAPA 10: PREPARAR E DEPLOYAR N8N
+log "=== ETAPA 10: DEPLOYANDO N8N VIA API ==="
 docker volume create n8n_data 2>/dev/null || true
 docker volume create n8n_postgres_data 2>/dev/null || true
 docker volume create n8n_redis_data 2>/dev/null || true
@@ -552,8 +560,8 @@ log "Aguardando dependências do N8N..."
 sleep 15
 deploy_stack_via_portainer "n8n" "/opt/n8n/n8n.yaml"
 
-# 10. PREPARAR E DEPLOYAR EVOLUTION
-log "=== ETAPA 10: DEPLOYANDO EVOLUTION VIA API ==="
+# ETAPA 11: PREPARAR E DEPLOYAR EVOLUTION
+log "=== ETAPA 11: DEPLOYANDO EVOLUTION VIA API ==="
 docker volume create evolution_redis_data 2>/dev/null || true
 docker volume create evolution_postgres_data 2>/dev/null || true
 docker volume create evolution_instances 2>/dev/null || true
@@ -655,8 +663,8 @@ log "Aguardando dependências da Evolution..."
 sleep 15
 deploy_stack_via_portainer "evolution" "/opt/evolution/evolution.yaml"
 
-# 11. FINALIZAÇÃO
-log "=== ETAPA 11: FINALIZANDO A INSTALAÇÃO ==="
+# ETAPA 12: FINALIZAÇÃO
+log "=== ETAPA 12: FINALIZANDO A INSTALAÇÃO ==="
 log "Aguardando todos os serviços inicializarem..."
 sleep 60
 
