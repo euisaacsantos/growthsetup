@@ -155,6 +155,16 @@ killall apt apt-get dpkg unattended-upgrades 2>/dev/null || true
 # Aguardar um momento
 sleep 5
 
+# ==============================================================================
+# CORREÇÃO: Remover stacks antigas para garantir que o Portainer as redescubra
+# ==============================================================================
+log "=== ETAPA 0: REMOVENDO STACKS ANTERIORES ==="
+log "Limpando instalações anteriores para garantir um ambiente limpo..."
+docker stack rm portainer traefik n8n n8n_redis n8n_postgres evolution evolution_redis evolution_postgres 2>/dev/null || true
+log "Aguardando a remoção completa das stacks..."
+sleep 15
+
+
 # 1. ATUALIZAR SISTEMA
 log "=== ETAPA 1: ATUALIZANDO SISTEMA ==="
 export DEBIAN_FRONTEND=noninteractive
@@ -993,5 +1003,4 @@ log "Webhook de conclusão enviado. Instalação finalizada!"
 log "Installation ID: ${INSTALLATION_ID}"
 
 exit 0
-
 
