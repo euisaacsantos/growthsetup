@@ -352,28 +352,33 @@ done
 deploy_stack_via_portainer() {
     local stack_name="$1"
     local compose_file_path="$2"
-    local stack_content=$(cat ${compose_file_path})
     
     log "Fazendo deploy da stack '${stack_name}' via API do Portainer..."
 
+    local stack_content=$(cat "${compose_file_path}")
+    local swarm_id=$(docker info --format '{{.Swarm.Cluster.ID}}')
+
+    # Usar jq para construir o payload JSON de forma segura
+    local json_payload
+    json_payload=$(jq -n \
+      --arg name "$stack_name" \
+      --arg swarm_id "$swarm_id" \
+      --arg content "$stack_content" \
+      '{Name: $name, SwarmID: $swarm_id, StackFileContent: $content, Env: []}')
+
+    # Fazer a chamada API com o payload pré-construído
     API_RESPONSE=$(curl -s -k -X POST \
         "https://${PORTAINER_DOMAIN}/api/stacks?type=1&method=string&endpointId=${PORTAINER_ENDPOINT_ID}" \
         -H "Authorization: Bearer ${PORTAINER_JWT}" \
         -H "Content-Type: application/json" \
-        -d @- <<EOF
-{
-  "Name": "${stack_name}",
-  "SwarmID": "$(docker info --format '{{.Swarm.Cluster.ID}}')",
-  "StackFileContent": $(echo "${stack_content}" | jq -R -s '.'),
-  "Env": []
-}
-EOF
-)
+        -d "${json_payload}")
     
     if echo "${API_RESPONSE}" | jq -e .Id > /dev/null; then
         log "✓ Deploy da stack '${stack_name}' iniciado com sucesso."
     else
-        error "Falha no deploy da stack '${stack_name}'. Resposta da API: ${API_RESPONSE}"
+        error "Falha no deploy da stack '${stack_name}'."
+        error "Payload enviado: ${json_payload}"
+        error "Resposta da API: ${API_RESPONSE}"
     fi
 }
 # ==============================================================================
